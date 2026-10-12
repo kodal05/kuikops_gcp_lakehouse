@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Leçon 0 — Par où tu commences ?</title>
+<link rel="stylesheet" href="../../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="../0000-where-do-you-start.html" hreflang="en" lang="en">English</a></p>
+<h1>Par où tu commences ?</h1>
+<p class="subtitle">Leçon 0 · lundi 9h30 · Où tu en es, et un setup qui marche</p>
+<div class="meta"><span>≈ 45 minutes</span><span>Prérequis : aucun</span><span>Référence : <a href="../../reference/glossary.html">glossaire</a> (en anglais)</span></div>
+
+<div class="aside mission"><span class="label">Pourquoi cette leçon</span>
+D'ici vendredi, tu auras construit un pipeline medallion sur GCP, en grande partie seul : personne dans la salle de mardi à jeudi. Du coup, il te faut deux choses :
+<ul>
+<li>une idée claire d'où <em>tu</em> pars, pour que les hints et les exercices stretch collent à ton niveau</li>
+<li>un environnement qui marche à 10h15, pour que la semaine parte dans le pipeline, pas dans Docker</li>
+</ul></div>
+
+<h2>1. Sept critères, trois niveaux <span class="tier core">core</span></h2>
+<p>Évalue-toi. Pas de note, tes réponses servent juste à caler la semaine.</p>
+<ul>
+<li><em>Rien</em> : les hints de chaque exercice sont écrits pour toi.</li>
+<li><em>Un peu</em> : tu l'as déjà utilisé, mais tu ne saurais pas le faire comprendre à quelqu'un.</li>
+<li><em>Solide</em> : tu pourrais l'expliquer à ton voisin, du coup les exercices stretch sont pour toi.</li>
+</ul>
+<div class="widget selfcheck" id="sc"></div>
+<p>Colle la ligne de résumé dans le canal Teams. Le formateur se sert des dix lignes pour faire les binômes, et vendredi tu compareras.</p>
+<p><strong>C'est bon quand</strong> ta ligne de résumé est dans le canal Teams.</p>
+
+<h2>2. Check de l'environnement <span class="tier core">core</span></h2>
+<p>Ouvre le repo partagé dans le devcontainer (VS Code : <em>Reopen in Container</em>). Lance chaque ligne dans son terminal.</p>
+<table>
+<tr><th>Lance</th><th>Tu dois voir</th><th>Sinon</th></tr>
+<tr><td><code>gcloud auth login</code></td><td>un onglet de navigateur, puis « You are now logged in »</td><td>ouvre l'URL sur ta machine hôte, recolle le code</td></tr>
+<tr><td><code>gcloud auth application-default login</code></td><td>« Credentials saved to file »</td><td>même astuce. C'est celle-là dont Terraform a besoin</td></tr>
+<tr><td><code>gcloud config set project kuikops-lakehouse</code></td><td>« Updated property [core/project] »</td><td>vérifie l'id dans l'en-tête du canal Teams (sandbox : un seul projet partagé pour dix apprenants, avec les rôles déjà donnés. Un client te donne plusieurs projets, de dev à prod, et quelqu'un d'autre t'attribue tes rôles IAM)</td></tr>
+<tr><td><code>gcloud storage ls</code></td><td>au moins <code>gs://kuikops-lakehouse-tfstate/</code> et <code>…-drops/</code></td><td>mauvais projet, ou login pas terminé</td></tr>
+<tr><td><code>terraform version</code></td><td>une ligne de version, pas d'erreur</td><td>tu n'es pas dans le devcontainer</td></tr>
+<tr><td><code>uv run --directory learners/_template pytest tests/test_smoke.py</code></td><td><code>1 passed</code> après un premier run lent</td><td>voir le hint 1 plus bas</td></tr>
+</table>
+<p>Le smoke test écrit une toute petite table Delta depuis une session Spark locale, la même que celle de tes tests mardi. Le premier run télécharge les packages JVM, du coup il est lent. Ensuite, c'est quelques secondes.</p>
+<p><strong>C'est bon quand</strong> les six lignes affichent ce qu'il y a dans la colonne « Tu dois voir ».</p>
+
+<div class="hints" id="ex-env"></div>
+
+<div class="aside warn"><span class="label">Toujours cassé à 10h15 ?</span>
+Mets-toi en binôme avec un voisin pour le bloc git de 10h30, et répare le tien avec le formateur pendant le déjeuner. Toujours bloqué ? Demande dans le canal Teams.</div>
+
+<h2>3. Trois prédictions <span class="tier core">core</span></h2>
+<p>Réponds dans ta tête avant 11h15. C'est toute la semaine en trois questions, réponses mercredi.</p>
+<div class="widget quiz" id="quiz1"></div>
+<p><strong>C'est bon quand</strong> tu as choisi une réponse pour les trois.</p>
+
+<h2>4. À lire avant 11h15</h2>
+<p>Le <a href="../../reference/glossary.html">glossaire</a> d'une page : cinq couches, trois mots de mouvement, un mot de plateforme, deux mots du cours. Utilise ses mots toute la semaine, dans les PR et à la démo de vendredi.</p>
+
+<div class="aside"><span class="label">Où demander</span>Un truc pas clair : ton binôme de review d'abord, puis le canal Teams. Le formateur répond dans la salle aujourd'hui et vendredi, et lit le canal le soir les autres jours.</div>
+
+<nav class="lesson-nav"><span>Début du cours</span><span><a href="0001-your-buckets-and-your-first-batch.html">Leçon 1 : tes buckets et ton premier batch →</a></span></nav>
+</main>
+<script src="../../assets/selfcheck.js"></script>
+<script src="../../assets/hints.js"></script>
+<script src="../../assets/quiz.js"></script>
+<script>
+SelfCheck.render("sc", ["Python", "SQL", "PySpark", "GCP and gcloud", "Terraform", "git and PRs", "Delta Lake"]);
+Hints.render("ex-env", {
+  hint1: "<p>Lis les dix dernières lignes de la sortie. <code>JAVA_HOME</code> ou <code>java: not found</code>, ça veut dire que tu es hors du devcontainer. Un <code>Connection refused</code> sur un téléchargement, c'est qu'il n'y a pas encore de réseau : attends une minute, relance.</p>",
+  hint2: "<p>Lance <code>java -version</code> et <code>uv run python -c \"import pyspark, delta; print(pyspark.__version__)\"</code> séparément. Celui qui plante, c'est la couche à réparer. Si Docker lui-même ne démarre pas, passe sur le fallback Cloud Shell. Ne passe pas ta matinée sur Docker.</p>"
+});
+Quiz.render("quiz1", [
+  { prompt: "Une ligne du drop 1 revient, identique, dans le drop 2. Combien de copies le <strong>bronze</strong> garde ?",
+    options: ["Deux lignes : le bronze garde tout l'historique", "Une ligne : le bronze dédoublonne au load", "Zéro ligne : le bronze rejette les doublons"],
+    answer: 0,
+    explain: "Le bronze ajoute chaque ligne arrivée en landing, avec son fichier source et son heure de load. Choisir la bonne copie, c'est le job du silver." },
+  { prompt: "Même doublon. Combien de copies le <strong>silver</strong> garde ?",
+    options: ["Une ligne : mergée sur la business key", "Deux lignes : le silver garde tout l'historique", "Zéro ligne : le silver rejette les doublons"],
+    answer: 0,
+    explain: "Le silver garde une ligne par entité métier, donc le MERGE sur le code-barres replie la copie dans la ligne qu'il a déjà, et le <code>last_modified</code> le plus récent gagne. Garder chaque copie, c'est le job du bronze, et un doublon n'est pas cassé, donc rien ne part en quarantine." },
+  { prompt: "Une ligne arrive sans code-barres. Elle finit où ?",
+    options: ["En quarantine, avec la règle qui a échoué", "En silver, avec le code-barres laissé à null", "Nulle part, le silver la jette tout simplement"],
+    answer: 0,
+    explain: "Aucune ligne ne disparaît, donc elle n'est pas jetée. Elle ne peut pas non plus rester dans le silver : le silver merge sur le code-barres, et une ligne sans code-barres n'a pas de business key sur laquelle merger. La quarantine est une table Delta à côté du silver, et chaque ligne porte la règle qu'elle a cassée." }
+]);
+</script>
+</body></html>

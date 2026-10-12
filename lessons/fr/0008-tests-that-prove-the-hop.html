@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Leçon 8 — Des tests qui prouvent le hop, et la CI</title>
+<link rel="stylesheet" href="../../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="../0008-tests-that-prove-the-hop.html" hreflang="en" lang="en">English</a></p>
+<h1>Des tests qui prouvent le hop, et la CI</h1>
+<p class="subtitle">Leçon 8 · jeudi 15h30 · Casse ton propre code exprès, regarde quel test le remarque, et laisse la CI le dire à tout le monde</p>
+<div class="meta"><span>≈ 75 minutes</span><span>Prérequis : les tests de la <a href="0005-silver-merge.html">leçon 5</a> qui passent, leçon 7 pas nécessaire avant</span><span>Référence : <a href="../../reference/pyspark-delta-cheatsheet.html">PySpark &amp; Delta cheat sheet</a> (en anglais) · <a href="../../reference/glossary.html">glossaire</a> (en anglais)</span></div>
+
+<div class="aside mission"><span class="label">Pourquoi cette leçon</span>
+Demain, le formateur lit toutes les PR. Comme un reviewer côté client, il ne lancera pas ton code. Il lira tes tests et le résultat de la CI. Un check vert ne veut dire quelque chose que si un hop faux le fait passer au rouge. Du coup aujourd'hui, c'est toi qui casses le hop.</div>
+
+<h2>1. Ce que la CI fait de ta PR</h2>
+<p>Le workflow du repo partagé (<code>.github/workflows/</code>) tourne sur chaque PR qui touche <code>learners/&lt;handle&gt;/</code>, uniquement dans ton dossier :</p>
+<ul>
+<li>il lance <code>uv run pytest</code> et <code>terraform validate</code></li>
+<li>il ne lance jamais de batch, ne touche pas à GCS et ne fait pas de <code>plan</code> : il prouve le code, pas le cloud. Sur un projet client, un pipeline séparé avec ses propres credentials lance en général <code>plan</code> et <code>apply</code>, souvent dans un projet auquel tu n'as pas accès (<a href="0010-gold-in-bigquery.html">leçon 10</a>, section 5)</li>
+<li>un check rouge bloque le merge</li>
+</ul>
+<p>Quand c'est rouge :</p>
+<ol>
+<li>sur la PR, ouvre <em>Checks</em> et clique sur l'étape qui échoue</li>
+<li>cherche <code>FAILED</code> ou <code>Error:</code> dans le log. Le premier résultat donne le nom du test ou du fichier <code>.tf</code></li>
+<li>ignore tout ce qui est au-dessus (les logs de setup)</li>
+</ol>
+
+<h2>2. Prédire, puis casser <span class="tier core">core</span></h2>
+<p>Une par une, fais chaque modification dans <code>jobs/silver.py</code>. <strong>Avant de lancer <code>uv run pytest tests/test_silver.py</code>, note quel test échoue, et avec quel message.</strong> Lance, compare, annule.</p>
+<table>
+<tr><th>Mutation</th><th>Changement</th></tr>
+<tr><td>A</td><td>Enlève la condition : <code>.whenMatchedUpdateAll()</code> au lieu de <code>.whenMatchedUpdateAll(condition="s.last_modified &gt; t.last_modified")</code></td></tr>
+<tr><td>B</td><td>Saute la dédup : merge <code>good.select(*SILVER_COLUMNS)</code> au lieu de <code>latest(good)</code></td></tr>
+</table>
+<p><strong>C'est bon quand</strong> tu as écrit une prédiction pour A et B, lancé les deux, et annulé les deux, avec <code>uv run pytest tests/test_silver.py</code> de nouveau vert.</p>
+<details class="hint"><summary><strong>Ce qu'on a vu</strong> <span class="sub">— à ouvrir après les deux runs</span></summary><div class="hint-body">
+<p><strong>A</strong> : <code>test_latest_last_modified_wins_and_rerun_changes_nothing</code> échoue sur sa première assertion, avec <code>Old water</code> et <code>2025-12-01</code> dans le silver. La mise à jour en retard a gagné.</p>
+<p><strong>B</strong> : le même test, mais la plupart des gens se trompent sur le message. Ce n'est <em>pas</em> <code>DELTA_MULTIPLE_SOURCE_ROW…</code>. Le premier MERGE écrit dans une table vide, du coup les trois lignes <code>001</code> sont insérées. Le test échoue sur une <code>AssertionError</code> avec des codes-barres en double (<a href="0005-silver-merge.html">leçon 5</a>). L'erreur du MERGE n'apparaîtrait qu'au deuxième run. Un test qui compare des lignes le voit dès le premier.</p>
+<p>Un test qui vérifie <code>silver.count() == 2</code> serait passé avec la mutation A. C'est pour ça qu'on compare des lignes.</p></div></details>
+
+<h2>3. Exercice : fais tourner le hop entier deux fois <span class="tier core">core</span></h2>
+<p>Jusqu'ici chaque test vérifie une fonction. Celui-ci fait tourner un hop entier via <code>run</code>, deux fois, comme le batch. Il vérifie ta règle la plus importante : une ligne sans code-barres n'arrive jamais dans le silver et atterrit en quarantine une seule fois. Dans <code>tests/test_run.py</code>, il te faut :</p>
+<ul>
+<li>un dossier landing dans <code>tmp_path</code> avec un CSV, les huit colonnes : une bonne ligne, une avec un <code>code</code> vide</li>
+<li><code>load_bronze</code>, puis <code>silver.run(spark, bronze, silver, quarantine)</code> <strong>deux fois</strong></li>
+<li>deux assertions sur les lignes : les codes du silver sont <code>["001"]</code>, et la quarantine contient une seule paire <code>(product_name, rule)</code></li>
+</ul>
+<p>Ensuite commente la règle <code>code_missing</code> et relance. S'il passe toujours, il ne teste pas ce que tu crois.</p>
+<p><strong>C'est bon quand</strong> le test passe, échoue sans la règle, et repasse quand la règle revient.</p>
+<div class="hints" id="ex-run"></div>
+
+<h2>4. Exercice : rouge, puis vert, dans la CI <span class="tier core">core</span></h2>
+<p>Crée la branche <code>&lt;handle&gt;/tests</code>, puis :</p>
+<ol>
+<li>Premier commit : le nouveau test <em>et</em> la mutation A. Push, ouvre une PR en draft, et trouve le test qui échoue dans le log de la CI (la recherche de la section 1).</li>
+<li>Deuxième commit : annule la mutation. Push et regarde-la passer au vert.</li>
+<li>Passe la PR en ready et demande une review à ton binôme. Dans la description, colle la ligne rouge du log qui a nommé le problème.</li>
+</ol>
+<p><strong>C'est bon quand</strong> la PR montre un run rouge et un run vert, et qu'elle est mergée.</p>
+<div class="hints" id="ex-ci"></div>
+
+<h2>5. Stretch : tout le pipeline dans un seul test <span class="tier stretch">stretch</span></h2>
+<p>Écris <code>test_pipeline.py</code> avec deux dossiers de drop : un doublon, une mise à jour en retard, un code-barres null, un <code>"12 g"</code>. Lance bronze, silver et gold dans l'ordre, puis fais une assertion sur les lignes de chaque table gold. C'est ton test le plus lent, donc garde-en un seul. Il répond au « est-ce que ça marche de bout en bout ? » d'un reviewer.</p>
+
+<h2>6. Teste-toi, sur toute la semaine</h2>
+<p>Ces questions mélangent tous les hops. Se rappeler de sujets mélangés, c'est plus dur, et c'est ce qui fait que ça reste (<a href="https://doi.org/10.1177/1529100612453266">Dunlosky et al., 2013</a>).</p>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>7. Source primaire</h2>
+<p><a href="https://docs.pytest.org/en/stable/how-to/fixtures.html">pytest: how to use fixtures</a>, les sections sur <em>scope</em> et <em>tmp_path</em> (15 minutes). Ta fixture <code>spark</code> est en scope session parce qu'une JVM par test, ce serait vraiment lent. <code>tmp_path</code> est par test, donc les tests ne partagent jamais de tables.</p>
+
+<div class="aside"><span class="label">Où demander</span>Ton binôme de review d'abord, puis le canal Teams. Ta ligne de 16h30 : ton drop, ton nombre de PR, ce que tu veux que le formateur regarde demain. Demain : <a href="0009-capstone-drop-5-and-the-contract.html">leçon 9, le capstone</a>.</div>
+
+<nav class="lesson-nav"><span><a href="0007-delta-history-restore-and-schema.html">← Leçon 7</a></span><span><a href="0009-capstone-drop-5-and-the-contract.html">Leçon 9 : capstone →</a></span></nav>
+</main>
+<script src="../../assets/hints.js"></script>
+<script src="../../assets/quiz.js"></script>
+<script>
+Hints.render("ex-run", {
+  hint1: "<p>Les chemins : <code>paths = [str(tmp_path / n) for n in (\"bronze\", \"silver\", \"quarantine\")]</code>, puis <code>silver.run(spark, *paths)</code>. Importe le module (<code>from jobs import silver</code>) pour que son nom n'entre pas en conflit avec la variable de chemin.</p>",
+  hint2: "<p>Si la quarantine contient deux fois la ligne <code>NoBarcode</code>, ton <code>run</code> fait un append sur la quarantine au lieu de l'écraser (<a href=\"0004-silver-rules-and-quarantine.html\">leçon 4</a>, section 4). Si le silver contient un <code>code</code> null, le MERGE a reçu des lignes avant que <code>split</code> les filtre.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day4/tests/test_run.py"
+});
+Hints.render("ex-ci", {
+  hint1: "<p>Même boucle de PR que dans la <a href=\"0001-your-buckets-and-your-first-batch.html\">leçon 1</a>, section 5. Sur GitHub, ouvre la flèche à côté de <em>Create pull request</em> et choisis <a href=\"https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/creating-a-pull-request\"><em>Create draft pull request</em></a>. Pas de run de CI ? Vérifie que l'onglet des fichiers ne montre que <code>learners/&lt;handle&gt;/</code>.</p>",
+  hint2: "<p><code>terraform validate</code> échoue mais pytest passe ? La CI lance d'abord <code>terraform init -backend=false</code>, donc une erreur de syntaxe ou une variable non déclarée le fait échouer. Lance les deux mêmes commandes dans ton dossier <code>terraform/</code> pour reproduire.</p>",
+  solution: ""
+});
+Quiz.render("quiz1", [
+  { prompt: "Quelle couche a le droit de changer la valeur d'une colonne qu'elle a lue ?",
+    options: ["Le silver, et aucune autre couche", "Le silver et le gold, jamais le bronze", "N'importe laquelle, si c'est testé"],
+    answer: 0,
+    explain: "Le bronze stocke ce qui a atterri. Le gold remodèle (explode, group) mais ne corrige jamais de valeurs. Typer, trimmer et parser, c'est le boulot du silver." },
+  { prompt: "Le bronze plante sur le drop 4 avec un schema mismatch. Quel est le bon premier réflexe ?",
+    options: ["Lire quelles colonnes sont nouvelles, puis décider", "Mettre mergeSchema sur l'écriture du bronze", "Supprimer la table bronze et tout recharger"],
+    answer: 0,
+    explain: "Chaque colonne nouvelle ou renommée est une décision : une map de renommage ou un <code>ALTER TABLE ADD COLUMNS</code> explicite, reviewé dans une PR. <code>mergeSchema</code> ferait disparaître l'erreur, mais il accepterait aussi chaque colonne surprise après celle-ci, et c'est justement le garde-fou que tu viens de déclencher." },
+  { prompt: "Le batch silver a planté au milieu de son MERGE. Tu fais quoi avant de le relancer ?",
+    options: ["Rien : le MERGE n'a jamais été commité", "Restaurer le silver à la version d'avant", "Supprimer les fichiers silver à moitié écrits"],
+    answer: 0,
+    explain: "Une écriture qui plante ne laisse aucun commit, donc le silver n'a pas bougé. Le hop est idempotent, du coup le re-run ne pose aucun problème." },
+  { prompt: "Tu relances le batch bronze sur un drop déjà chargé. Qu'est-ce qui protège le silver ?",
+    options: ["Le MERGE garde une ligne par code-barres", "Le bronze refuse un fichier déjà vu", "Delta dédoublonne les lignes appendées"],
+    answer: 0,
+    explain: "Le bronze append la copie (sauf si tu as fait le stretch de la leçon 3). La window <code>latest</code> et le MERGE la ramènent à une ligne par <code>code</code>." }
+]);
+</script>
+</body></html>

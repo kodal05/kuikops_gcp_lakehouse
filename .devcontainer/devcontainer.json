@@ -1,0 +1,21 @@
+{
+  "name": "kuikops",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu22.04",
+  "features": {
+    "ghcr.io/devcontainers/features/java:1.8.3": { "version": "17", "jdkDistro": "tem" },
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.12", "toolsToInstall": "uv" },
+    "ghcr.io/devcontainers/features/terraform:1": {},
+    "ghcr.io/aqua/devcontainer-gcloud/gcloud": {},
+    "ghcr.io/devcontainers/features/common-utils:2.6.0": {
+      "configureZshAsDefaultShell": true,
+      "username": "kuikode"
+    }
+  },
+  "remoteUser": "kuikode",
+  "postCreateCommand": "uv tool install --editable tools/drop",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "hashicorp.terraform"]
+    }
+  }
+}

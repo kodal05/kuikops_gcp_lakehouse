@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Leçon 7 — L'historique de Delta, le restore et le drop 4</title>
+<link rel="stylesheet" href="../../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="../0007-delta-history-restore-and-schema.html" hreflang="en" lang="en">English</a></p>
+<h1>L'historique de Delta, le restore et le drop 4</h1>
+<p class="subtitle">Leçon 7 · jeudi 13h15 · Demander à une table ce qu'un hop a fait, annuler un mauvais run, et choisir d'accepter un changement de schema</p>
+<div class="meta"><span>≈ 2h</span><span>Prérequis : <a href="0006-gold-never-cleans.html">leçon 6</a>, le drop 3 passé jusqu'au gold</span><span>Référence : <a href="../../reference/pyspark-delta-cheatsheet.html">PySpark &amp; Delta cheat sheet</a> (en anglais) · <a href="../../reference/glossary.html">glossaire</a> (en anglais)</span></div>
+
+<div class="aside mission"><span class="label">Pourquoi cette leçon</span>
+Toute vraie plateforme finit par poser deux questions, en général au pire moment : « qu'est-ce que le run de cette nuit a changé ? » et « on peut revenir en arrière ? ». Le log de Delta répond aux deux. Ensuite le drop 4 arrive avec les colonnes renommées et nouvelles de la war story de la <a href="0002-dataframes-and-delta-locally.html">leçon 2</a>. Et cette fois, tu les acceptes parce que tu l'as décidé.</div>
+
+<h2>1. Le log, c'est la mémoire de la table</h2>
+<p>Chaque écriture réussie est un commit avec une version, une opération et des métriques (<a href="https://docs.delta.io/latest/delta-utility.html">table utility commands</a>). Pour un MERGE :</p>
+<pre><code>h = DeltaTable.forPath(spark, silver).history()
+h.select(<span class="s">"version"</span>, <span class="s">"operation"</span>,
+         F.col(<span class="s">"operationMetrics.numTargetRowsInserted"</span>).alias(<span class="s">"ins"</span>),
+         F.col(<span class="s">"operationMetrics.numTargetRowsUpdated"</span>).alias(<span class="s">"upd"</span>)).orderBy(<span class="s">"version"</span>).show()</code></pre>
+<p>Voici le silver après l'avoir construit deux fois depuis le même bronze. L'historique va du plus récent au plus ancien, c'est pour ça que tu ajoutes <code>orderBy</code> :</p>
+<table>
+<tr><th>version</th><th>operation</th><th>ins</th><th>upd</th><th>Lecture</th></tr>
+<tr><td>0</td><td>WRITE</td><td>NULL</td><td>NULL</td><td>table vide de ton premier run</td></tr>
+<tr><td>1</td><td>MERGE</td><td>6</td><td>0</td><td>premier chargement : six codes-barres, tous nouveaux</td></tr>
+<tr><td>2</td><td>MERGE</td><td>0</td><td>0</td><td>re-run, même bronze : rien n'a changé</td></tr>
+</table>
+<p>Pour revenir en arrière dans le log :</p>
+<ul>
+<li><code>spark.read.format("delta").option("versionAsOf", n)</code> lit la table telle qu'elle était à la version <code>n</code>.</li>
+<li><code>DeltaTable.forPath(spark, path).restoreToVersion(n)</code> rend la version <code>n</code> courante à nouveau, sous la forme d'un <em>nouveau</em> commit (<code>RESTORE</code> dans l'historique). Rien n'est effacé.</li>
+</ul>
+
+<h2>2. Exercice : casse-la, regarde, restaure <span class="tier core">core</span></h2>
+<p>En local, dans <code>jobs/explore_history.py</code>, construis le silver avec tes propres <code>split</code> et <code>merge_silver</code> à partir de quatre ou cinq lignes bronze. Ensuite simule un mauvais run, causé par un mauvais <code>mode</code> :</p>
+<pre><code>v_good = DeltaTable.forPath(spark, silver).history(1).first().version
+spark.read.format(<span class="s">"delta"</span>).load(silver).limit(1) \
+     .write.format(<span class="s">"delta"</span>).mode(<span class="s">"overwrite"</span>).save(silver)        <span class="c"># the bad run</span></code></pre>
+<p><strong>Écris ta prédiction pour chaque étape</strong>, puis affiche :</p>
+<ol>
+<li>le nombre de lignes actuel</li>
+<li>le nombre de lignes à <code>versionAsOf = v_good</code></li>
+<li>les trois dernières entrées de l'historique (version, operation)</li>
+<li>après <code>restoreToVersion(v_good)</code> : le nombre de lignes, et la dernière opération.</li>
+</ol>
+<p><strong>C'est bon quand</strong> le compte restauré est égal au compte à <code>v_good</code>, que l'historique se termine par <code>RESTORE</code>, et que tu sais expliquer pourquoi la mauvaise version est toujours lisible.</p>
+<div class="hints" id="ex-restore"></div>
+<div class="aside warn"><span class="label">Le restore a une limite</span>
+Le time travel et le restore ont besoin des anciens fichiers de données. Une fois que <code>VACUUM</code> a supprimé les fichiers non référencés au-delà de la rétention (7 jours par défaut), ces versions sont perdues (<a href="https://docs.delta.io/latest/delta-utility.html">utility commands: vacuum</a>). Personne ne lance <code>VACUUM</code> cette semaine. Sur une plateforme client, demande qui le fait, et quand.</div>
+
+<h2>3. Drop 4 : prédis d'abord</h2>
+<p>Le header du drop 4 renomme <code>sugars_100g</code> en <code>sugar_100g</code> et ajoute <code>ecoscore_grade</code>. Ton job bronze append tout ce qu'il lit. Qu'est-ce qui se passe ? Écris-le, puis relis le geste 5 de la <a href="0002-dataframes-and-delta-locally.html">leçon 2</a>.</p>
+<details class="hint"><summary><strong>Ce qui se passe</strong> <span class="sub">— à ouvrir après ta prédiction</span></summary><div class="hint-body">
+<p>Le batch plante : <code>A schema mismatch detected when writing to the Delta table</code>. Le bronze refuse les deux colonnes inconnues, <code>sugar_100g</code> et <code>ecoscore_grade</code>, et n'écrit rien. Cette erreur, c'est le garde-fou que la plateforme de la war story de la <a href="0002-dataframes-and-delta-locally.html">leçon 2</a> avait désactivé.</p>
+<p>Le garde-fou rate un cas. Un drop à qui il <em>manque</em> juste une colonne passe, avec cette colonne à null sur toutes les lignes. Si le fournisseur avait supprimé <code>sugars_100g</code>, le bronze l'aurait chargé sans erreur, et le silver aurait perdu le sucre. Les colonnes manquantes, c'est le boulot de ton contract et de tes comptes par règle.</p></div></details>
+
+<h2>4. Exercice : accepter le changement, en connaissance de cause <span class="tier core">core</span></h2>
+<p>Deux décisions, chacune sur une ligne qu'un reviewer peut lire dans ta PR :</p>
+<pre><code><span class="k">from</span> delta <span class="k">import</span> DeltaTable
+
+RENAMES = {<span class="s">"sugar_100g"</span>: <span class="s">"sugars_100g"</span>}   <span class="c"># drop 4: the supplier renamed a column</span>
+ADDED = {<span class="s">"ecoscore_grade"</span>: <span class="s">"STRING"</span>}      <span class="c"># drop 4: a new column, accepted on purpose</span>
+
+
+<span class="k">def</span> load_bronze(spark, landing, bronze):
+    raw = spark.read.option(<span class="s">"header"</span>, <span class="k">True</span>).csv(landing).withColumnsRenamed(RENAMES)
+    <span class="k">if</span> DeltaTable.isDeltaTable(spark, bronze):
+        have = set(spark.read.format(<span class="s">"delta"</span>).load(bronze).columns)
+        <span class="k">for</span> name, sql_type <span class="k">in</span> ADDED.items():
+            <span class="k">if</span> name <span class="k">in</span> raw.columns <span class="k">and</span> name <span class="k">not in</span> have:
+                spark.sql(<span class="s">f"ALTER TABLE delta.`{bronze}` ADD COLUMNS ({name} {sql_type})"</span>)
+    ...  <span class="c"># stamp and append, unchanged</span></code></pre>
+<p><code>withColumnsRenamed</code> ignore les noms absents, du coup les anciens drops passent sans changement (<a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.withColumnsRenamed.html">API</a>). <code>ALTER TABLE … ADD COLUMNS</code> fait son propre commit : l'historique montre la décision, et les anciennes lignes se lisent à null (<a href="https://docs.delta.io/latest/delta-batch.html">batch writes: update table schema</a>). Écris les deux tests d'abord :</p>
+<pre><code><span class="k">def</span> test_drop4_rename_and_new_column(spark, tmp_path):
+    <span class="k">for</span> n, body <span class="k">in</span> [(<span class="s">"drop1"</span>, <span class="s">"code,sugars_100g\n001,45\n"</span>),
+                    (<span class="s">"drop4"</span>, <span class="s">"code,sugar_100g,ecoscore_grade\n002,4,a\n"</span>)]:
+        (tmp_path / n).mkdir(); (tmp_path / n / <span class="s">"p.csv"</span>).write_text(body)
+        load_bronze(spark, str(tmp_path / n), str(tmp_path / <span class="s">"bronze"</span>))
+    b = spark.read.format(<span class="s">"delta"</span>).load(str(tmp_path / <span class="s">"bronze"</span>))
+    <span class="k">assert</span> sorted((r.code, r.sugars_100g, r.ecoscore_grade) <span class="k">for</span> r <span class="k">in</span> b.collect()) == [
+        (<span class="s">"001"</span>, <span class="s">"45"</span>, <span class="k">None</span>), (<span class="s">"002"</span>, <span class="s">"4"</span>, <span class="s">"a"</span>)]
+
+
+<span class="k">def</span> test_unknown_new_column_is_refused(spark, tmp_path):
+    <span class="k">import</span> pytest
+    <span class="k">for</span> n, body <span class="k">in</span> [(<span class="s">"d1"</span>, <span class="s">"code\n001\n"</span>), (<span class="s">"d2"</span>, <span class="s">"code,surprise\n002,x\n"</span>)]:
+        (tmp_path / n).mkdir(); (tmp_path / n / <span class="s">"p.csv"</span>).write_text(body)
+    load_bronze(spark, str(tmp_path / <span class="s">"d1"</span>), str(tmp_path / <span class="s">"bronze"</span>))
+    <span class="k">with</span> pytest.raises(Exception, match=<span class="s">"schema mismatch"</span>):
+        load_bronze(spark, str(tmp_path / <span class="s">"d2"</span>), str(tmp_path / <span class="s">"bronze"</span>))</code></pre>
+<p>Le deuxième test protège le garde-fou : la <em>prochaine</em> colonne surprise plante toujours. Ensuite charge le drop 4 dans le bronze et relance le silver et le gold. Un piège : le silver écrase la quarantine, et les lignes rejetées portent maintenant <code>ecoscore_grade</code>, donc le même garde-fou refuse cette écriture. La quarantine est reconstruite à chaque run, alors laisse son schéma suivre le bronze : ajoute <code>.option("overwriteSchema", "true")</code> à l'écriture de la quarantine. Lis chaque batch avec <code>gcloud dataproc batches wait</code> (<a href="0003-landing-to-bronze.html">leçon 3</a>, section 3), le dernier <code>Traceback</code> d'abord si ça a échoué. <code>ecoscore_grade</code> reste hors du silver tant que personne n'a décidé de l'y mettre.</p>
+<p><strong>C'est bon quand</strong> les deux tests passent, que le drop 4 est dans le bronze, et que l'historique du bronze montre <code>ADD COLUMNS</code>. <code>drop next</code> vérifie le drop 4 et te donne le drop 5, le capstone de vendredi. Le commencer ou pas, c'est toi qui vois.</p>
+<p>Refusé deux fois avec la même ligne ? Poste-la sur Teams avec ton handle, puis <code>drop next --force</code> et dis-le dans ta PR (<a href="0003-landing-to-bronze.html">leçon 3</a>, section 4).</p>
+<div class="hints" id="ex-schema"></div>
+
+<h2>5. Stretch : quelles lignes ont changé <span class="tier stretch">stretch</span></h2>
+<p>Pour voir <em>quelles</em> lignes ont changé, et pas <em>combien</em>, fais un diff des deux dernières versions du silver : affiche <code>new.exceptAll(old)</code> et <code>old.exceptAll(new)</code> (<a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.exceptAll.html"><code>exceptAll</code></a>). Ajoute-le à la sortie du batch silver après le MERGE, limité à 20 lignes. Sur une plateforme client, c'est le snippet à coller dans le canal d'incident.</p>
+
+<h2>6. Teste-toi</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>7. Source primaire</h2>
+<p>La <a href="https://docs.delta.io/latest/delta-utility.html">page Delta « Table utility commands »</a>, sections <em>Retrieve Delta table history</em>, <em>Restore a Delta table</em> et <em>Remove files no longer referenced</em> (20 minutes). Puis la partie <em>Update table schema</em> de <a href="https://docs.delta.io/latest/delta-batch.html">batch reads and writes</a>, où <code>autoMerge</code> est « not recommended ». Maintenant tu sais pourquoi.</p>
+
+<div class="aside"><span class="label">Où demander</span>Ton binôme de review d'abord, puis le canal Teams. Ligne de 16h30 sur Teams. Les solutions sont débloquées à 17h00, après les deux indices. Ton binôme vérifie d'abord : le second test échoue toujours sur une colonne nouvelle. Ensuite : <a href="0008-tests-that-prove-the-hop.html">leçon 8, des tests qui prouvent le hop, et la CI</a>.</div>
+
+<nav class="lesson-nav"><span><a href="0006-gold-never-cleans.html">← Leçon 6</a></span><span><a href="0008-tests-that-prove-the-hop.html">Leçon 8 : tests et CI →</a></span></nav>
+</main>
+<script src="../../assets/hints.js"></script>
+<script src="../../assets/quiz.js"></script>
+<script>
+Hints.render("ex-restore", {
+  hint1: "<p>Chaque print est un geste de la section 1 : la lecture <code>versionAsOf</code> pour les deux comptes, <code>history()</code> pour les entrées, <code>restoreToVersion</code> pour la dernière.</p>",
+  hint2: "<p>Si le compte à <code>versionAsOf = v_good</code> est égal au mauvais compte, <code>v_good</code> a été lu après la mauvaise écriture. Garde la ligne <code>history(1)</code> au-dessus de l'overwrite, comme dans le snippet.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day4/jobs/explore_history.py"
+});
+Hints.render("ex-schema", {
+  hint1: "<p>D'abord le rename, puis l'<code>ALTER</code>, puis le stamp-and-append inchangé. L'<code>ALTER</code> ne tourne que si la table existe sans la colonne, donc les re-runs ne posent pas de problème.</p>",
+  hint2: "<p><code>ALTER TABLE delta.`gs://…`</code> prend un chemin entre backticks. Si le batch du drop 4 plante toujours avec un schema mismatch, affiche <code>raw.columns</code> juste après le rename : un header avec un espace en trop (<code>\"sugar_100g \"</code>) ne matchera pas la clé dans <code>RENAMES</code>.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day4/jobs/bronze.py"
+});
+Quiz.render("quiz1", [
+  { prompt: "Tu restaures le silver à la version 5. Tu peux encore lire la version 7 après ?",
+    options: ["Oui, le restore est un nouveau commit par-dessus", "Non, le restore supprime les versions 6 et 7", "Seulement si tu restaures à nouveau la version 7"],
+    answer: 0,
+    explain: "Le restore écrit une nouvelle version égale à la version 5. Les versions 6 et 7 restent là jusqu'à ce que <code>VACUUM</code> supprime leurs fichiers." },
+  { prompt: "Pourquoi accepter <code>ecoscore_grade</code> avec <code>ALTER TABLE</code> plutôt qu'avec <code>mergeSchema</code> ?",
+    options: ["Il nomme cette colonne, la suivante reste refusée", "mergeSchema ne marche pas sur les chemins GCS", "ALTER TABLE est plus rapide sur les grosses tables"],
+    answer: 0,
+    explain: "<code>mergeSchema</code> accepterait n'importe quelle nouvelle colonne, celle d'aujourd'hui comme celle de demain. Un <code>ALTER</code> explicite en accepte une seule, après review, et garde le garde-fou pour le reste." },
+  { prompt: "Tu charges le drop 4 dans le bronze et tu lances le silver. Son MERGE affiche <code>numTargetRowsInserted = 0</code> et <code>numTargetRowsUpdated = 0</code>. Qu'est-ce que ça te dit ?",
+    options: ["Le drop 4 n'est jamais arrivé au MERGE", "Le silver est idempotent, c'est normal", "Le MERGE a planté, puis a été annulé"],
+    answer: 0,
+    explain: "Zéro et zéro, c'est à ça que ressemble un re-run sur le même bronze. Après un nouveau drop avec des codes-barres nouveaux ou plus récents, ça veut dire qu'aucun n'a passé <code>split</code> : regarde les comptes par règle, et vérifie que le bronze contient bien le drop 4. Un MERGE qui plante ne laisse aucun commit, donc il n'y aurait aucune métrique à lire." }
+]);
+</script>
+</body></html>

@@ -1,0 +1,70 @@
+# Data contract for the silver "food_products" table.
+# Each rule below traces back to the drop that introduced it in the course.
+apiVersion: v3.2.0
+kind: DataContract
+id: silver-food-products
+name: Silver Food Products
+version: 1.0.0
+status: active
+domain: esn-teaching
+
+description:
+  purpose: >
+    Contract for the Delta silver table of OpenFoodFacts-like products,
+    built by the learner's job from the bronze layer.
+  usage: Validate the silver job output before it is published or merged downstream.
+
+servers:
+  # type: custom + customType: dataframe is how ODCS stays spec-compliant while
+  # telling datacontract-cli to test against an in-session Spark DataFrame
+  # (see https://docs.datacontract.com/reference/dataframe) instead of a real system.
+  - server: local
+    type: custom
+    customProperties:
+      - property: customType
+        value: dataframe
+
+schema:
+  - name: silver_food_products
+    description: One row per product (barcode), deduplicated by the MERGE in drop 2.
+    properties:
+      - name: code
+        logicalType: string
+        physicalType: string
+        description: Barcode, the business key.
+        required: true
+        unique: true  # drop 2: the MERGE keys on `code`, so duplicates must never land here
+
+      - name: product_name
+        logicalType: string
+        physicalType: string
+
+      - name: brands
+        logicalType: string
+        physicalType: string
+
+      - name: categories
+        logicalType: string
+        physicalType: string
+
+      - name: countries
+        logicalType: string
+        physicalType: string
+
+      - name: nutrition_grade_fr
+        logicalType: string
+        physicalType: string
+        description: Nutri-Score grade, a..e. Null when OpenFoodFacts has no grade.
+
+      - name: sugars_100g
+        logicalType: number
+        physicalType: double
+        description: Sugars per 100g. Null when not reported.
+        logicalTypeOptions:
+          minimum: 0
+          maximum: 100  # drop 5: a physically impossible value means the parse/unit logic broke
+
+      - name: last_modified
+        logicalType: date
+        physicalType: date
+        required: true  # drop 3: the source mixes two date formats; an unparsed one becomes null here

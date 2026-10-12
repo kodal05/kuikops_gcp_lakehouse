@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Leçon 9 — Capstone : le drop 5 et le contrat</title>
+<link rel="stylesheet" href="../../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="../0009-capstone-drop-5-and-the-contract.html" hreflang="en" lang="en">English</a></p>
+<h1>Capstone : le drop 5 et le contrat</h1>
+<p class="subtitle">Leçon 9 · vendredi 9h50 · Fais tourner tout le pipeline sur le pire drop, et laisse un contrat te dire si le silver est bon</p>
+<div class="meta"><span>Build de 9h50 à 12h15</span><span>Prérequis : le drop 4 dans le bronze (<a href="0007-delta-history-restore-and-schema.html">leçon 7</a>)</span><span>Référence : <a href="../../reference/silver-contract.odcs.yaml">contrat silver</a> (en anglais) · <a href="../../reference/pyspark-delta-cheatsheet.html">cheat sheet PySpark &amp; Delta</a> (en anglais) · <a href="../../reference/glossary.html">glossaire</a> (en anglais)</span></div>
+
+<div class="aside mission"><span class="label">Pourquoi cette leçon</span>
+Sur un projet client, ce n'est pas toi qui dis « le silver est bon ». C'est un check qui le dit pour toi. Ce matin, un data contract vérifie ton silver, et le passer sur le drop 5, c'est le critère de validation de la semaine. Chaque ligne est une règle que tu as déjà construite mercredi ou jeudi, sauf que maintenant c'est un outil qui la vérifie, pas toi.</div>
+
+<h2>1. Lire le contrat</h2>
+<p>Ouvre <a href="../../reference/silver-contract.odcs.yaml"><code>reference/silver-contract.odcs.yaml</code></a>. Il est au format Open Data Contract Standard (<a href="https://bitol-io.github.io/open-data-contract-standard/latest/">ODCS</a>), un format YAML pour décrire « ce qu'une table promet ». Trois lignes couvrent la semaine :</p>
+<table>
+<tr><th>Ligne du contrat</th><th>Ce qu'elle vérifie</th><th>Le travail qui la fait passer</th></tr>
+<tr><td><code>code: required, unique</code></td><td>pas de code-barres null, pas de code-barres en double</td><td>règle <code>code_missing</code>, plus <code>latest</code> + MERGE (<a href="0005-silver-merge.html">leçon 5</a>)</td></tr>
+<tr><td><code>last_modified: required</code>, <code>date</code></td><td>chaque ligne a une date parsée</td><td>deux formats de date, non parsable → quarantine (leçons <a href="0004-silver-rules-and-quarantine.html">4</a> et <a href="0006-gold-never-cleans.html">6</a>)</td></tr>
+<tr><td><code>sugars_100g: number, minimum 0, maximum 100</code></td><td>pas de valeur de sucre impossible</td><td>aujourd'hui</td></tr>
+</table>
+<p>Il vérifie aussi les huit colonnes du silver et leurs types. <code>drop check silver</code> enregistre ton silver sous <code>silver_food_products</code> et lance le contrat avec <a href="https://docs.datacontract.com/testing">datacontract-cli</a>. Chaque check affiche <code>[passed]</code> ou <code>[failed]</code> avec une raison :</p>
+<pre><code>[failed] Check that field sugars_100g has a maximum of 100 -- Actual invalid_count(sugars_100g) was 1, expected = 0</code></pre>
+
+<h2>2. Prédire le drop 5 avant de le charger</h2>
+<p>Le drop 5 garde les défauts des drops 2 à 4. Il en ajoute deux nouveaux : <strong>des valeurs de sucre hors de 0 à 100</strong>, et <strong>un fichier coupé au milieu d'une ligne</strong>. Avec ton pipeline tel quel, note où chacun finit (bronze ? silver ? quarantine, sous quelle règle ?). Est-ce que le contrat passe ?</p>
+<details class="hint"><summary><strong>Ce qui se passe</strong> <span class="sub">— à ouvrir une fois le drop 5 lancé</span></summary><div class="hint-body">
+<p><strong>Sucre hors limites</strong> : <code>"120"</code> se caste en <code>120.0</code> sans erreur. Aucune règle ne se déclenche, donc il atterrit dans le silver et le contrat échoue sur le maximum. Une valeur peut être bien formée et quand même impossible.</p>
+<p><strong>La ligne coupée</strong> : le lecteur CSV remplit avec null les champs manquants en fin de ligne. Du coup la ligne arrive dans le bronze sans <code>last_modified</code>. Le silver la met en quarantine comme <code>last_modified_unparseable</code>, une règle écrite pour autre chose. Regarde son compteur : une règle qui se déclenche pour deux raisons en cache une.</p></div></details>
+
+<h2>3. Exercice : la dernière règle <span class="tier core">core</span></h2>
+<ol>
+<li>Ajoute une ligne à ton test <code>split</code> : <code>("009", "toomuch", "120", "2026-03-01")</code>, attendue en quarantine comme <code>sugars_out_of_range</code>.</li>
+<li>Ajoute la règle à la chaîne <code>F.when</code>, après <code>sugars_not_a_number</code>, sur la valeur <em>typée</em> : <code>(F.col("_sugars") &lt; 0) | (F.col("_sugars") &gt; 100)</code>.</li>
+</ol>
+<p>Un sucre null, ça veut dire inconnu, pas hors limites. Vérifie que ta règle est d'accord.</p>
+<p><strong>C'est bon quand</strong> le test passe et que ta ligne <code>005</code> sans sucre reste dans le silver.</p>
+<div class="hints" id="ex-rule"></div>
+
+<h2>4. Exercice : de bout en bout, puis le check <span class="tier core">core</span></h2>
+<ol>
+<li><code>drop next</code> (si tu n'as pas encore le drop 5).</li>
+<li>Bronze : <code>drop = 5</code>, incrémente <code>bronze_run</code>, apply, <code>batches wait</code>.</li>
+<li>Silver : incrémente <code>silver_run</code>, apply, wait. <strong>Lis d'abord les compteurs des règles.</strong></li>
+<li>Gold : incrémente <code>gold_run</code>, apply, wait.</li>
+<li><code>drop check silver</code>, jusqu'à ce que chaque ligne dise <code>[passed]</code>.</li>
+</ol>
+<p>Un apply par hop, et chacun attend le précédent. Pourquoi ? Parce que Terraform lance tous les batches d'un apply en parallèle, et le silver a besoin que le bronze soit fini. Sandbox : ici, c'est toi l'ordonnanceur. Sur un projet client, un orchestrateur soumet chaque hop dans cet ordre toutes les nuits. Quelqu'un est alerté quand l'un d'eux échoue (<a href="0010-gold-in-bigquery.html">leçon 10</a>, section 5).</p>
+<p><strong>C'est bon quand</strong> <code>drop check silver</code> est tout vert sur le drop 5 (le critère de validation).</p>
+<div class="hints" id="ex-check"></div>
+
+<h2>5. La PR du capstone <span class="tier core">core</span></h2>
+<p>Crée une branche <code>&lt;handle&gt;/capstone</code> avec tout ce que tu as fait depuis ton dernier merge. Dans la description, colle :</p>
+<ul>
+<li>les compteurs des règles du run silver sur le drop 5</li>
+<li>la dernière ligne de <code>drop check silver</code></li>
+<li>une phrase sur ce qui change dans ton pipeline, et dans quelle couche, si le client annonce que les fournisseurs vont renvoyer des lignes corrigées avec un <code>last_modified</code> inchangé</li>
+<li>la sortie de <code>terraform state list</code>, qui montre tes quatre buckets et les batchs bronze, silver et gold</li>
+</ul>
+<p>Ensuite review par ton binôme, CI au vert, et la review du formateur, obligatoire sur cette PR.</p>
+
+<h2 id="demo">6. Préparer la démo (15h00, cinq minutes)</h2>
+<ul class="checklist">
+<li>Lance <code>drop check silver</code> en live, puis montre les premières lignes des deux tables gold dans la sortie de ton batch gold sur le drop 5.</li>
+<li>Montre la quarantine : quelles règles se sont déclenchées sur le drop 5, et combien de lignes pour chacune.</li>
+<li>Ton binôme te tend une ligne défectueuse inédite, écrite par le formateur sur une carte, par exemple un sucre <code>"0,5"</code> avec une virgule décimale. Dis en live où ton pipeline l'envoie aujourd'hui, et quelle couche et quelle règle devraient changer.</li>
+<li>Montre un truc que tu ferais autrement.</li>
+<li>Dis lesquelles de tes règles silver tu garderais pour une autre source, et lesquelles tu retirerais.</li>
+</ul>
+<p>Ton binôme de review pose une question, a priori sur la quarantine.</p>
+
+<h2>7. Stretch : une promesse à toi <span class="tier stretch">stretch</span></h2>
+<p>Dans une copie du contrat, ajoute une règle qui dit que <code>nutrition_grade_fr</code> vaut de <code>a</code> à <code>e</code>. Rien ne le vérifie aujourd'hui. Le bon champ ODCS est dans la <a href="https://bitol-io.github.io/open-data-contract-standard/latest/">spécification</a>. Ajoute la règle silver qui va avec et lance le check avec ta copie. Qui devrait porter cette ligne, toi ou le consommateur du silver ?</p>
+
+<h2>8. Teste-toi</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>9. Source primaire</h2>
+<p>La <a href="https://bitol-io.github.io/open-data-contract-standard/latest/">spécification ODCS</a>, sections schema et data quality (20 minutes), avec ton contrat ouvert à côté. Ensuite la <a href="https://docs.datacontract.com/testing">page testing de datacontract-cli</a> : le même fichier lancé contre un warehouse au lieu d'un DataFrame.</p>
+
+<div class="aside"><span class="label">Où demander</span>Le formateur est dans la salle aujourd'hui. Commence quand même par ton binôme : il connaît ton code. Cet après-midi : <a href="0010-gold-in-bigquery.html">leçon 10, le gold dans BigQuery</a> (stretch), puis les démos à 15h00.</div>
+
+<nav class="lesson-nav"><span><a href="0008-tests-that-prove-the-hop.html">← Leçon 8</a></span><span><a href="0010-gold-in-bigquery.html">Leçon 10 : le gold dans BigQuery →</a></span></nav>
+</main>
+<script src="../../assets/hints.js"></script>
+<script src="../../assets/quiz.js"></script>
+<script>
+Hints.render("ex-rule", {
+  hint1: "<p>Un <code>.when(…, \"sugars_out_of_range\")</code> de plus à la fin de la chaîne. Une comparaison avec null donne null, et <code>when</code> traite null comme false. Du coup un sucre null ne tombe dans aucune règle, tout seul.</p>",
+  hint2: "<p><code>[CAST_INVALID_INPUT] The value 'lots' …</code> dans le test ? Compare <code>_sugars</code> (le helper typé), pas <code>sugars_100g</code> (la string du bronze). Comparer <code>\"120\"</code> avec <code>100</code> en ANSI mode, c'est un cast, et un cast de <code>\"lots\"</code> lève une erreur.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day5/jobs/silver.py"
+});
+Hints.render("ex-check", {
+  hint1: "<p>Lis seulement la première ligne <code>[failed]</code>. <code>duplicate_count(code)</code> : la source de ton MERGE n'est pas dédupliquée, ou le silver a été écrit une fois sans le MERGE. <code>missing_count(last_modified)</code> : un parse de date qui renvoie null n'est pas envoyé en quarantine.</p>",
+  hint2: "<p>Un check de type échoue (<code>sugars_100g</code> n'est pas un nombre, ou <code>last_modified</code> pas une date) : ton silver a été créé avant le typage de la <a href=\"0004-silver-rules-and-quarantine.html\">leçon 4</a>. Le schema du silver est figé à sa première écriture. Restaure une version plus ancienne ou, dans la sandbox, supprime <code>gs://…-silver/products</code> et relance le silver, puisqu'il se reconstruit depuis le bronze.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day5/"
+});
+Quiz.render("quiz1", [
+  { prompt: "Une ligne du drop 5 a <code>sugars_100g = \"-3\"</code>. Avec les seules règles de jeudi, où finit-elle ?",
+    options: ["En silver, à -3.0, sans règle déclenchée", "En quarantine, en sugars_not_a_number", "En silver, avec le sucre mis à null"],
+    answer: 0,
+    explain: "<code>\"-3\"</code> est bien formé, donc <code>try_cast</code> renvoie <code>-3.0</code> et <code>sugars_not_a_number</code> ne se déclenche pas : cette règle n'attrape que les valeurs illisibles. Rien jeudi ne vérifiait la plage, c'est pour ça que le contrat échoue et que <code>sugars_out_of_range</code> existe." },
+  { prompt: "Le silver passe le contrat. Le gold peut-il encore afficher des chiffres faux ?",
+    options: ["Oui, le contrat ne vérifie que le silver", "Non, le gold vient du silver uniquement", "Seulement si le gold a son propre contrat"],
+    answer: 0,
+    explain: "Un <code>groupBy</code> faux ou un explode oublié, c'est un bug du gold lui-même. Le contrat vérifie le silver, tes tests gold vérifient le gold." },
+  { prompt: "Une ligne coupée s'arrête juste après son <code>code</code>, <code>010</code>. Quelle règle l'envoie en quarantine dans <code>split</code> ?",
+    options: ["last_modified_unparseable, la première qu'elle rate", "sugars_not_a_number, car le sucre est vide", "code_missing, puisque la ligne est cassée"],
+    answer: 0,
+    explain: "Le reader remplit les champs manquants avec null, et <code>split</code> prend la première règle que la ligne rate. Le <code>code</code> est là, donc <code>code_missing</code> passe. Un sucre vide est inconnu, pas mal formé, donc <code>sugars_not_a_number</code> ne peut pas se déclencher. La date null échoue ensuite. Le piège, c'est que ce compteur mélange maintenant des dates fausses et des lignes coupées." }
+]);
+</script>
+</body></html>

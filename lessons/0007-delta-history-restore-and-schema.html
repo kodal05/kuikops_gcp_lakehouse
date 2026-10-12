@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lesson 7 — Delta's history, restore, and drop 4</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="fr/0007-delta-history-restore-and-schema.html" hreflang="fr" lang="fr">Français</a></p>
+<h1>Delta's history, restore, and drop 4</h1>
+<p class="subtitle">Lesson 7 · Thursday 13:15 · Ask a table what a hop did, undo a bad run, and choose to accept a schema change</p>
+<div class="meta"><span>≈ 2 hours</span><span>Prerequisite: <a href="0006-gold-never-cleans.html">lesson 6</a>, drop 3 through gold</span><span>Reference: <a href="../reference/pyspark-delta-cheatsheet.html">PySpark &amp; Delta cheat sheet</a> · <a href="../reference/glossary.html">glossary</a></span></div>
+
+<div class="aside mission"><span class="label">Why this lesson</span>
+Every real platform asks two questions, usually at a bad moment: "what did last night's run change?" and "can we put it back?". Delta's log answers both. Then drop 4 brings the renamed and new columns from <a href="0002-dataframes-and-delta-locally.html">lesson 2</a>'s war story, and this time you accept them by choice.</div>
+
+<h2>1. The log is the table's memory</h2>
+<p>Each successful write is a commit with a version, an operation and metrics (<a href="https://docs.delta.io/latest/delta-utility.html">table utility commands</a>). For a MERGE:</p>
+<pre><code>h = DeltaTable.forPath(spark, silver).history()
+h.select(<span class="s">"version"</span>, <span class="s">"operation"</span>,
+         F.col(<span class="s">"operationMetrics.numTargetRowsInserted"</span>).alias(<span class="s">"ins"</span>),
+         F.col(<span class="s">"operationMetrics.numTargetRowsUpdated"</span>).alias(<span class="s">"upd"</span>)).orderBy(<span class="s">"version"</span>).show()</code></pre>
+<p>Here's silver after you build it twice from the same bronze. History comes newest-first, that's why you add <code>orderBy</code>:</p>
+<table>
+<tr><th>version</th><th>operation</th><th>ins</th><th>upd</th><th>Reading</th></tr>
+<tr><td>0</td><td>WRITE</td><td>NULL</td><td>NULL</td><td>empty table from your first run</td></tr>
+<tr><td>1</td><td>MERGE</td><td>6</td><td>0</td><td>first load: six barcodes, all new</td></tr>
+<tr><td>2</td><td>MERGE</td><td>0</td><td>0</td><td>re-run, same bronze: nothing changed</td></tr>
+</table>
+<p>To go back in the log:</p>
+<ul>
+<li><code>spark.read.format("delta").option("versionAsOf", n)</code> reads the table as it was at version <code>n</code>.</li>
+<li><code>DeltaTable.forPath(spark, path).restoreToVersion(n)</code> makes version <code>n</code> current again, as a <em>new</em> commit (<code>RESTORE</code> in history). Nothing gets erased.</li>
+</ul>
+
+<h2>2. Exercise: break it, see it, restore it <span class="tier core">core</span></h2>
+<p>Locally, in <code>jobs/explore_history.py</code>, build silver with your own <code>split</code> and <code>merge_silver</code> from four or five bronze rows. Then fake a bad run from a wrong <code>mode</code>:</p>
+<pre><code>v_good = DeltaTable.forPath(spark, silver).history(1).first().version
+spark.read.format(<span class="s">"delta"</span>).load(silver).limit(1) \
+     .write.format(<span class="s">"delta"</span>).mode(<span class="s">"overwrite"</span>).save(silver)        <span class="c"># the bad run</span></code></pre>
+<p><strong>Predict each step in writing</strong>, then print:</p>
+<ol>
+<li>the current row count</li>
+<li>the row count at <code>versionAsOf = v_good</code></li>
+<li>the last three history entries (version, operation)</li>
+<li>after <code>restoreToVersion(v_good)</code>: the row count, and the last operation.</li>
+</ol>
+<p><strong>Done when</strong> the restored count equals the count at <code>v_good</code>, history ends with <code>RESTORE</code>, and you can explain why the bad version is still readable.</p>
+<div class="hints" id="ex-restore"></div>
+<div class="aside warn"><span class="label">Restore has a limit</span>
+Time travel and restore need the old data files. Once <code>VACUUM</code> deletes unreferenced files past retention (7 days by default), those versions are gone (<a href="https://docs.delta.io/latest/delta-utility.html">utility commands: vacuum</a>). Nobody runs <code>VACUUM</code> this week. On a client platform, ask who does, and when.</div>
+
+<h2>3. Drop 4: predict first</h2>
+<p>Drop 4's header renames <code>sugars_100g</code> to <code>sugar_100g</code> and adds <code>ecoscore_grade</code>. Your bronze job appends whatever it reads. What happens? Write it down, then check <a href="0002-dataframes-and-delta-locally.html">lesson 2</a>'s move 5.</p>
+<details class="hint"><summary><strong>What happens</strong> <span class="sub">— open after you predicted</span></summary><div class="hint-body">
+<p>The batch fails: <code>A schema mismatch detected when writing to the Delta table</code>. Bronze refuses the two unknown columns, <code>sugar_100g</code> and <code>ecoscore_grade</code>, and writes nothing. That error is the guard that the platform in <a href="0002-dataframes-and-delta-locally.html">lesson 2</a>'s war story had switched off.</p>
+<p>The guard misses one case: a drop that's just <em>missing</em> a column goes through, with that column null in every row. If the supplier had removed <code>sugars_100g</code>, bronze would have loaded it with no error, and silver would have lost sugar. Missing columns are a job for your contract and your rule counts.</p></div></details>
+
+<h2>4. Exercise: accept the change, on purpose <span class="tier core">core</span></h2>
+<p>Two decisions, each one line a reviewer can read in your PR:</p>
+<pre><code><span class="k">from</span> delta <span class="k">import</span> DeltaTable
+
+RENAMES = {<span class="s">"sugar_100g"</span>: <span class="s">"sugars_100g"</span>}   <span class="c"># drop 4: the supplier renamed a column</span>
+ADDED = {<span class="s">"ecoscore_grade"</span>: <span class="s">"STRING"</span>}      <span class="c"># drop 4: a new column, accepted on purpose</span>
+
+
+<span class="k">def</span> load_bronze(spark, landing, bronze):
+    raw = spark.read.option(<span class="s">"header"</span>, <span class="k">True</span>).csv(landing).withColumnsRenamed(RENAMES)
+    <span class="k">if</span> DeltaTable.isDeltaTable(spark, bronze):
+        have = set(spark.read.format(<span class="s">"delta"</span>).load(bronze).columns)
+        <span class="k">for</span> name, sql_type <span class="k">in</span> ADDED.items():
+            <span class="k">if</span> name <span class="k">in</span> raw.columns <span class="k">and</span> name <span class="k">not in</span> have:
+                spark.sql(<span class="s">f"ALTER TABLE delta.`{bronze}` ADD COLUMNS ({name} {sql_type})"</span>)
+    ...  <span class="c"># stamp and append, unchanged</span></code></pre>
+<p><code>withColumnsRenamed</code> ignores missing names, so older drops go through untouched (<a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.withColumnsRenamed.html">API</a>). <code>ALTER TABLE … ADD COLUMNS</code> commits on its own: history shows the decision, and older rows read null (<a href="https://docs.delta.io/latest/delta-batch.html">batch writes: update table schema</a>). Write both tests first:</p>
+<pre><code><span class="k">def</span> test_drop4_rename_and_new_column(spark, tmp_path):
+    <span class="k">for</span> n, body <span class="k">in</span> [(<span class="s">"drop1"</span>, <span class="s">"code,sugars_100g\n001,45\n"</span>),
+                    (<span class="s">"drop4"</span>, <span class="s">"code,sugar_100g,ecoscore_grade\n002,4,a\n"</span>)]:
+        (tmp_path / n).mkdir(); (tmp_path / n / <span class="s">"p.csv"</span>).write_text(body)
+        load_bronze(spark, str(tmp_path / n), str(tmp_path / <span class="s">"bronze"</span>))
+    b = spark.read.format(<span class="s">"delta"</span>).load(str(tmp_path / <span class="s">"bronze"</span>))
+    <span class="k">assert</span> sorted((r.code, r.sugars_100g, r.ecoscore_grade) <span class="k">for</span> r <span class="k">in</span> b.collect()) == [
+        (<span class="s">"001"</span>, <span class="s">"45"</span>, <span class="k">None</span>), (<span class="s">"002"</span>, <span class="s">"4"</span>, <span class="s">"a"</span>)]
+
+
+<span class="k">def</span> test_unknown_new_column_is_refused(spark, tmp_path):
+    <span class="k">import</span> pytest
+    <span class="k">for</span> n, body <span class="k">in</span> [(<span class="s">"d1"</span>, <span class="s">"code\n001\n"</span>), (<span class="s">"d2"</span>, <span class="s">"code,surprise\n002,x\n"</span>)]:
+        (tmp_path / n).mkdir(); (tmp_path / n / <span class="s">"p.csv"</span>).write_text(body)
+    load_bronze(spark, str(tmp_path / <span class="s">"d1"</span>), str(tmp_path / <span class="s">"bronze"</span>))
+    <span class="k">with</span> pytest.raises(Exception, match=<span class="s">"schema mismatch"</span>):
+        load_bronze(spark, str(tmp_path / <span class="s">"d2"</span>), str(tmp_path / <span class="s">"bronze"</span>))</code></pre>
+<p>The second test keeps the guard: the <em>next</em> surprise column still fails. Then load drop 4 into bronze and re-run silver and gold. One catch: silver overwrites quarantine, and the rejected rows now carry <code>ecoscore_grade</code>, so the same guard refuses that write. Quarantine is rebuilt every run, so let its schema follow bronze: add <code>.option("overwriteSchema", "true")</code> to the quarantine write. Read each batch with <code>gcloud dataproc batches wait</code> (<a href="0003-landing-to-bronze.html">lesson 3</a>, section 3), last <code>Traceback</code> first if it failed. <code>ecoscore_grade</code> stays out of silver until someone decides it should.</p>
+<p><strong>Done when</strong> both tests pass, drop 4 is in bronze, and bronze's history shows <code>ADD COLUMNS</code>. <code>drop next</code> checks drop 4 and hands you drop 5, Friday's capstone. Starting it is up to you.</p>
+<p>Refused twice with the same line? Post it in Teams with your handle, then <code>drop next --force</code> and name it in your PR (<a href="0003-landing-to-bronze.html">lesson 3</a>, section 4).</p>
+<div class="hints" id="ex-schema"></div>
+
+<h2>5. Stretch: which rows changed <span class="tier stretch">stretch</span></h2>
+<p>To see <em>which</em> rows changed, not <em>how many</em>, diff silver's last two versions: print <code>new.exceptAll(old)</code> and <code>old.exceptAll(new)</code> (<a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.exceptAll.html"><code>exceptAll</code></a>). Add it to the silver batch's output after the MERGE, capped at 20 rows. On a client platform, that's the snippet for the incident channel.</p>
+
+<h2>6. Check yourself</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>7. Primary source</h2>
+<p>The <a href="https://docs.delta.io/latest/delta-utility.html">Delta "Table utility commands" page</a>, sections <em>Retrieve Delta table history</em>, <em>Restore a Delta table</em> and <em>Remove files no longer referenced</em> (20 minutes). Then the <em>Update table schema</em> part of <a href="https://docs.delta.io/latest/delta-batch.html">batch reads and writes</a>, where <code>autoMerge</code> is "not recommended". Now you know why.</p>
+
+<div class="aside"><span class="label">Where to ask</span>Your review pair first, then the Teams channel. 16:30 line in Teams. Solutions unlock at 17:00, after both hints. Your pair checks first: the second test still fails on a new column. Next: <a href="0008-tests-that-prove-the-hop.html">lesson 8, tests that prove the hop, and CI</a>.</div>
+
+<nav class="lesson-nav"><span><a href="0006-gold-never-cleans.html">← Lesson 6</a></span><span><a href="0008-tests-that-prove-the-hop.html">Lesson 8: tests and CI →</a></span></nav>
+</main>
+<script src="../assets/hints.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+Hints.render("ex-restore", {
+  hint1: "<p>Each print is a move from section 1: the <code>versionAsOf</code> read for the two counts, <code>history()</code> for the entries, <code>restoreToVersion</code> for the last one.</p>",
+  hint2: "<p>If the count at <code>versionAsOf = v_good</code> equals the bad count, <code>v_good</code> was read after the bad write. Keep the <code>history(1)</code> line above the overwrite, as in the snippet.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day4/jobs/explore_history.py"
+});
+Hints.render("ex-schema", {
+  hint1: "<p>Rename first, then <code>ALTER</code>, then the unchanged stamp-and-append. The <code>ALTER</code> only runs when the table exists without the column, so re-runs are safe.</p>",
+  hint2: "<p><code>ALTER TABLE delta.`gs://…`</code> takes a path in backticks. If the drop-4 batch still fails with a schema mismatch, print <code>raw.columns</code> right after the rename: a header with a stray space (<code>\"sugar_100g \"</code>) won't match the key in <code>RENAMES</code>.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day4/jobs/bronze.py"
+});
+Quiz.render("quiz1", [
+  { prompt: "You restore silver to version 5. Can you still read version 7 afterwards?",
+    options: ["Yes, restore is a new commit on top", "No, restore deletes versions 6 and 7", "Only if you restore again to version 7"],
+    answer: 0,
+    explain: "Restore writes a new version equal to version 5. Versions 6 and 7 stay until <code>VACUUM</code> removes their files." },
+  { prompt: "Why accept <code>ecoscore_grade</code> with <code>ALTER TABLE</code> rather than <code>mergeSchema</code>?",
+    options: ["It names this column, the next is still refused", "mergeSchema doesn't work on GCS paths", "ALTER TABLE is faster on large tables"],
+    answer: 0,
+    explain: "<code>mergeSchema</code> would accept any new column, today's and tomorrow's. An explicit <code>ALTER</code> accepts one, after review, and keeps the guard for the rest." },
+  { prompt: "You load drop 4 into bronze and run silver. Its MERGE shows <code>numTargetRowsInserted = 0</code> and <code>numTargetRowsUpdated = 0</code>. What does that tell you?",
+    options: ["Drop 4's rows never reached the MERGE", "Silver is idempotent, so it's expected", "The MERGE failed and was rolled back"],
+    answer: 0,
+    explain: "Zero and zero is what a re-run on the same bronze looks like. After a new drop with new or newer barcodes, it means none of them got past <code>split</code>: check the rule counts, and check bronze really holds drop 4. A failed MERGE leaves no commit, so there'd be no metrics to read." }
+]);
+</script>
+</body></html>

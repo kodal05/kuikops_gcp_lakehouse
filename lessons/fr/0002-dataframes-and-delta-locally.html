@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Leçon 2 — DataFrames et Delta, en local</title>
+<link rel="stylesheet" href="../../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="../0002-dataframes-and-delta-locally.html" hreflang="en" lang="en">English</a></p>
+<h1>DataFrames et Delta, en local</h1>
+<p class="subtitle">Leçon 2 · mardi 9h45 · Lire un fichier, le tamponner, l'ajouter à Delta, et voir Delta en refuser un mauvais</p>
+<div class="meta"><span>≈ 60 minutes</span><span>Prérequis : <a href="0001-your-buckets-and-your-first-batch.html">leçon 1</a>, le drop 1 dans ton landing</span><span>Référence : <a href="../../reference/glossary.html">glossaire</a> (en anglais) · <a href="../../reference/terraform-and-gcloud-cheatsheet.html">cheat sheet</a> (en anglais)</span></div>
+
+<div class="aside mission"><span class="label">Pourquoi cette leçon</span>
+Le batch landing→bronze de cet après-midi, c'est cinq gestes : lire, tamponner, ajouter (append), relire, et se faire refuser. Entraîne-toi ici, en local, sur deux tout petits fichiers. Le bronze, c'est le hop le plus simple, mais une erreur là-dedans fait le plus mal : toutes les couches suivantes lui font confiance. Sur un projet client, c'est une équipe source que tu ne contrôles pas qui alimente le bronze. Du coup, une écriture refusée est souvent le premier signe qu'elle a changé quelque chose.</div>
+
+<h2>1. Une session, deux configs</h2>
+<p>Delta, c'est un format de table : des fichiers Parquet plus un journal de transactions. Spark a besoin de deux réglages pour ça (<a href="https://docs.delta.io/quick-start/">quick start</a>), déjà dans une fixture de scope session dans le <code>tests/conftest.py</code> du template :</p>
+<pre><code><span class="k">from</span> delta <span class="k">import</span> configure_spark_with_delta_pip
+<span class="k">from</span> pyspark.sql <span class="k">import</span> SparkSession
+
+builder = (SparkSession.builder.master(<span class="s">"local[2]"</span>)
+  .config(<span class="s">"spark.sql.extensions"</span>, <span class="s">"io.delta.sql.DeltaSparkSessionExtension"</span>)
+  .config(<span class="s">"spark.sql.catalog.spark_catalog"</span>, <span class="s">"org.apache.spark.sql.delta.catalog.DeltaCatalog"</span>))
+spark = configure_spark_with_delta_pip(builder).getOrCreate()</code></pre>
+<p>Sur le runtime des batches, garde les deux lignes <code>.config</code> mais saute <code>configure_spark_with_delta_pip</code> : Delta est déjà sur le classpath (regarde le <code>hello.py</code> de la <a href="0001-your-buckets-and-your-first-batch.html">leçon 1</a>).</p>
+
+<h2>2. Les cinq gestes <span class="tier core">core</span></h2>
+<p>Enregistre-le sous <code>learners/&lt;handle&gt;/jobs/explore.py</code>, lance-le avec <code>uv run python -m jobs.explore</code>. <strong>Avant de le lancer, note ce que vont afficher les quatre lignes <code>print</code> numérotées.</strong> Ensuite, compare.</p>
+<pre><code><span class="k">import</span> tempfile, os
+<span class="k">from</span> pyspark.sql <span class="k">import</span> functions <span class="k">as</span> F
+<span class="k">from</span> tests.conftest <span class="k">import</span> make_spark        <span class="c"># same builder as the fixture</span>
+spark = make_spark()
+
+d = tempfile.mkdtemp(); landing = <span class="s">f"{d}/landing"</span>; bronze = <span class="s">f"{d}/bronze"</span>
+os.makedirs(landing)
+open(<span class="s">f"{landing}/drop1.csv"</span>, <span class="s">"w"</span>).write(<span class="s">"code,product_name,sugars_100g,last_modified\n001,Choco,45,2026-01-01\n002,Water,0,2026-01-01\n"</span>)
+open(<span class="s">f"{landing}/drop2.csv"</span>, <span class="s">"w"</span>).write(<span class="s">"code,product_name,sugars_100g,last_modified\n001,Choco bar,44,2026-02-01\n,NoBarcode,1,2026-02-01\n003,Juice,10,2026-02-01\n"</span>)
+
+<span class="c"># move 1: read. Every column is a string; bronze keeps it that way.</span>
+raw = spark.read.option(<span class="s">"header"</span>, <span class="k">True</span>).csv(landing)
+
+<span class="c"># move 2: stamp. Which file, when.</span>
+stamped = raw.select(<span class="s">"*"</span>,
+    F.col(<span class="s">"_metadata.file_path"</span>).alias(<span class="s">"source_file"</span>),
+    F.current_timestamp().alias(<span class="s">"loaded_at"</span>))
+
+<span class="c"># move 3: append.</span>
+stamped.write.format(<span class="s">"delta"</span>).mode(<span class="s">"append"</span>).save(bronze)
+
+<span class="c"># move 4: read back.</span>
+b = spark.read.format(<span class="s">"delta"</span>).load(bronze)
+<span class="k">print</span>(<span class="s">"1. rows:"</span>, b.count())
+<span class="k">print</span>(<span class="s">"2. distinct source files:"</span>, b.select(<span class="s">"source_file"</span>).distinct().count())
+<span class="k">print</span>(<span class="s">"3. sugars type:"</span>, dict(b.dtypes)[<span class="s">"sugars_100g"</span>])
+
+<span class="c"># move 5: be refused. A drop with a new column.</span>
+<span class="k">try</span>:
+    stamped.withColumn(<span class="s">"extra"</span>, F.lit(1)).write.format(<span class="s">"delta"</span>).mode(<span class="s">"append"</span>).save(bronze)
+    <span class="k">print</span>(<span class="s">"4. appended"</span>)
+<span class="k">except</span> Exception <span class="k">as</span> e:
+    <span class="k">print</span>(<span class="s">"4. refused:"</span>, str(e).splitlines()[0][:80])</code></pre>
+<p><strong>C'est bon quand</strong> tu as écrit quatre prédictions, lancé le script, et comparé chacune à la section 3.</p>
+<div class="hints" id="ex-moves"></div>
+
+<h2>3. Ce que tu viens de voir</h2>
+<table>
+<tr><th>Ligne</th><th>Valeur</th><th>Pourquoi</th></tr>
+<tr><td>1</td><td>5</td><td>Deux fichiers, cinq lignes. Le bronze fait de l'append, donc le doublon <code>001</code> fait deux lignes, et c'est normal.</td></tr>
+<tr><td>2</td><td>2</td><td>Le fichier de chaque ligne. <code>_metadata.file_path</code> remplace <code>input_file_name()</code> (<a href="https://docs.databricks.com/aws/ingestion/file-metadata-column">file metadata column</a>).</td></tr>
+<tr><td>3</td><td><code>string</code></td><td>Le CSV donne des strings, et le bronze ne caste pas. Le typage, c'est le job du silver, et son risque.</td></tr>
+<tr><td>4</td><td>refused: <em>A schema mismatch detected…</em></td><td>Schema enforcement : toute l'écriture échoue, rien de partiel n'atterrit (<a href="https://docs.delta.io/latest/delta-batch.html">batch writes: schema validation</a>).</td></tr>
+</table>
+<div class="aside key"><span class="label">La galère de lundi : pourquoi le bronze refuse les nouvelles colonnes</span>
+La ligne 4, c'est pour ça que tu peux faire confiance au bronze. L'option <code>mergeSchema</code>, ou le réglage de session <code>spark.databricks.delta.schema.autoMerge.enabled</code>, transforme le refus en nouvelle colonne, sans aucune erreur. La doc Delta dit d'autoMerge qu'il est « not recommended because it can lead to unintended schema changes ». Une vraie plateforme tournait avec autoMerge activé : une colonne renommée par le fournisseur est devenue une nouvelle colonne nulle, sans aucune erreur. Le drop 4 va te tenter : une nouvelle colonne, c'est une <em>décision</em>, pas un réglage par défaut.</div>
+
+<h2>4. Exercice : l'historique <span class="tier core">core</span></h2>
+<p>Ajoute ces lignes à <code>explore.py</code> et prédis la sortie avant de lancer :</p>
+<pre><code><span class="k">from</span> delta <span class="k">import</span> DeltaTable
+<span class="k">print</span>(<span class="s">"5."</span>, [(r.version, r.operation) <span class="k">for</span> r <span class="k">in</span> DeltaTable.forPath(spark, bronze).history().select(<span class="s">"version"</span>, <span class="s">"operation"</span>).collect()])
+<span class="k">print</span>(<span class="s">"6."</span>, spark.read.format(<span class="s">"delta"</span>).option(<span class="s">"versionAsOf"</span>, 0).load(bronze).count())</code></pre>
+<p><strong>C'est bon quand</strong> tu sais dire, sans regarder, combien il y a de versions et pourquoi l'écriture refusée n'en est pas une (<a href="https://docs.delta.io/latest/delta-utility.html">table utility commands</a>).</p>
+<div class="hints" id="ex-history"></div>
+
+<h2>5. Stretch : le cast qui mord <span class="tier stretch">stretch</span></h2>
+<p>Le drop 3 va livrer des quantités comme <code>"12 g"</code>. Lance <code>spark.createDataFrame([("12 g",)], ["q"]).select(F.col("q").cast("double")).show()</code> en local. Ça lève une erreur au lieu de renvoyer null : l'ANSI mode est activé par défaut (<a href="https://spark.apache.org/docs/4.0.0/sql-migration-guide.html">migration guide</a>).</p>
+<ol>
+<li>Trouve la fonction de <a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/functions.html"><code>pyspark.sql.functions</code></a> qui renvoie null à la place.</li>
+<li>Note quelle couche devrait l'utiliser.</li>
+<li>Note ce qui devrait arriver à la ligne devenue null.</li>
+</ol>
+
+<h2>6. Vérifie tes acquis</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>7. Source primaire</h2>
+<p>La page <a href="https://docs.delta.io/latest/delta-batch.html">Delta "Table batch reads and writes"</a> (15 minutes), tout ce que fait le bronze :</p>
+<ul>
+<li><em>Write to a table</em></li>
+<li><em>Schema validation</em></li>
+<li><em>Query an older snapshot</em></li>
+</ul>
+
+<div class="aside"><span class="label">Où demander</span>Ton binôme de review d'abord, puis le canal Teams. Binôme absent ? Demande au handle suivant de la liste sur Teams. Le formateur le lit ce soir. Le stand-up est à 9h30, et cette leçon démarre juste après. Cet après-midi : <a href="0003-landing-to-bronze.html">leçon 3, landing→bronze en job testé et en batch</a>.</div>
+
+<nav class="lesson-nav"><span><a href="0001-your-buckets-and-your-first-batch.html">← Leçon 1</a></span><span><a href="0003-landing-to-bronze.html">Leçon 3 : landing → bronze →</a></span></nav>
+</main>
+<script src="../../assets/hints.js"></script>
+<script src="../../assets/quiz.js"></script>
+<script>
+Hints.render("ex-moves", {
+  hint1: "<p>Prédis à partir du commentaire au-dessus de chaque move : le move 1 dit quel type a chaque colonne, le move 3 ajoute les deux fichiers, le move 5 écrit une colonne que la table n'a pas.</p>",
+  hint2: "<p><code>ModuleNotFoundError: tests</code> : lance depuis <code>learners/&lt;handle&gt;/</code>, pas depuis <code>jobs/</code>, ou mets <code>PYTHONPATH=.</code>. Une longue stack trace Java ? Lis la première ligne après <code>Exception</code>.</p><p>Si la ligne 4 affiche <code>appended</code>, ta session active l'évolution de schema. Vérifie <code>spark.conf.get(\"spark.databricks.delta.schema.autoMerge.enabled\")</code> et les options d'écriture : aucun des deux ne devrait être défini.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day2/jobs/explore.py"
+});
+Hints.render("ex-history", {
+  hint1: "<p>Chaque écriture réussie est un commit. Compte les écritures réussies dans le script.</p>",
+  hint2: "<p>Les versions commencent à 0. Une écriture refusée ne commite jamais, donc elle ne laisse aucune version. <code>versionAsOf 0</code> lit la table telle qu'elle était après le premier commit.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day2/jobs/explore.py"
+});
+Quiz.render("quiz1", [
+  { prompt: "Le bronze reçoit le même fichier deux fois par erreur. Il doit faire quoi du second load ?",
+    options: ["L'ajouter à nouveau, tamponné avec son heure de load", "Le sauter, parce que le fichier source est déjà connu", "Le merger pour que chaque code-barres reste unique"],
+    answer: 0,
+    explain: "Le bronze garde chaque ligne arrivée avec son tampon, et il ne décide jamais rien. Le silver dédoublonne en mergeant sur la business key, et c'est le tampon qui lui permet de repérer le rejeu." },
+  { prompt: "Une écriture Delta plante au milieu de son second fichier. Qu'est-ce que voit un lecteur ?",
+    options: ["La table exactement comme avant l'écriture", "Les lignes du premier fichier, pas du second", "Rien tant que le writer n'a pas redémarré"],
+    answer: 0,
+    explain: "Une écriture Delta, c'est un seul commit atomique dans le log. Pas de commit, pas de version, pas de lignes partielles." },
+  { prompt: "Le drop 3 livre <code>\"12 g\"</code> dans <code>sugars_100g</code>. Que fait l'append du bronze de cette ligne ?",
+    options: ["Il l'ajoute, la colonne est string de toute façon", "Il plante : la valeur ne se caste pas en double", "Il l'ajoute, avec sugars_100g mis à null"],
+    answer: 0,
+    explain: "Le bronze ne caste jamais, donc chaque colonne CSV reste une string et <code>\"12 g\"</code> atterrit tel quel. Planter sur le cast, ou mettre la valeur à null, voudrait dire que le bronze type la colonne. Typer, c'est une règle du silver, où un échec part en quarantine." }
+]);
+</script>
+</body></html>

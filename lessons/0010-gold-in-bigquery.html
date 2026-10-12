@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lesson 10 — Gold in BigQuery, and what comes next</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="fr/0010-gold-in-bigquery.html" hreflang="fr" lang="fr">Français</a></p>
+<h1>Gold in BigQuery, and what comes next</h1>
+<p class="subtitle">Lesson 10 · Friday 13:45 · Query your Delta gold from BigQuery without copying it, chart it, and find where to keep learning</p>
+<div class="meta"><span>≈ 75 minutes</span><span>Prerequisite: both gold tables written on drop 5 (<a href="0009-capstone-drop-5-and-the-contract.html">lesson 9</a>)</span><span>Reference: <a href="../reference/pyspark-delta-cheatsheet.html">PySpark &amp; Delta cheat sheet</a> · <a href="../reference/glossary.html">glossary</a></span></div>
+
+<div class="aside mission"><span class="label">Why this lesson</span>
+Your gold is files in a bucket, and your client's analysts live in BigQuery and dashboards. BigQuery reads the Delta log directly, so no export job. The whole lesson is <span class="tier stretch">stretch</span> (the pass criterion was this morning's contract). It's what you'd demo to a client next.</div>
+
+<h2>1. A table that's just a pointer</h2>
+<p>A BigQuery <em>external table</em> over Delta Lake stores no data, just the bucket path and a connection whose service account can read it. The schema comes from the Delta log, so you can't edit it in BigQuery (<a href="https://docs.cloud.google.com/bigquery/docs/create-delta-lake-table">BigQuery: create Delta Lake tables</a>). The bootstrap created your dataset <code>&lt;handle&gt;_gold</code> and the connection. You only write the DDL. Sandbox: on a client project, the connection and its service account's read on the gold bucket are usually an IAM request to someone else. Ask for it in week one.</p>
+<pre><code>CREATE EXTERNAL TABLE `kuikops-lakehouse.&lt;handle&gt;_gold.nutriscore_by_category`
+  WITH CONNECTION `kuikops-lakehouse.europe-west1.gold-reader`
+  OPTIONS (
+    format = <span class="s">"DELTA_LAKE"</span>,
+    uris   = [<span class="s">"gs://kuikops-lakehouse-&lt;handle&gt;-gold/nutriscore_by_category"</span>]
+  );</code></pre>
+<p>Limits to know before a client asks (same page), none of which your gold tables hit:</p>
+<ul>
+<li>no change data capture</li>
+<li>no materialized views</li>
+<li>no BigQuery Storage Read API</li>
+<li>no <code>timestamp_ntz</code> columns</li>
+</ul>
+
+<h2>2. Exercise: both gold tables in BigQuery <span class="tier stretch">stretch</span></h2>
+<p>In the BigQuery console (or <code>bq query --use_legacy_sql=false</code>), create both external tables. Then in SQL: which category has the highest share of grade <code>e</code> products in France?</p>
+<p><strong>Done when</strong> both tables appear in your dataset and your query returns one category.</p>
+<div class="hints" id="ex-bq"></div>
+
+<h2>3. Exercise: does BigQuery see a new gold? <span class="tier stretch">stretch</span></h2>
+<p>The docs don't say clearly if a query sees Delta commits made after the table's creation. So measure it:</p>
+<ol>
+<li>Note one number from <code>brands_sugar</code>.</li>
+<li>Change something upstream that moves it, then re-run silver and gold.</li>
+<li>Query again without touching the external table.</li>
+</ol>
+<p>Post your result in the Teams channel with the batch ids. If two of you disagree, start a thread.</p>
+
+<h2>4. Exercise: one chart per question <span class="tier stretch">stretch</span></h2>
+<p>In <a href="https://lookerstudio.google.com/">Looker Studio</a>, add a BigQuery data source on each table and build one chart for each:</p>
+<ul>
+<li>stacked bars of grade share per category, with a country filter</li>
+<li>a bar chart of top brands by product count, coloured by average sugar</li>
+</ul>
+<p>If a chart needs a filter or column the gold table doesn't have, stop. That's a new gold table in <code>gold.py</code>, not a calculated field in the dashboard.</p>
+
+<h2>5. What you didn't learn, on purpose</h2>
+<table>
+<tr><th>Topic</th><th>Where it starts from</th></tr>
+<tr><td>Orchestration and streaming: the three hops on a schedule, or on a continuous source</td><td>a scheduler automates your three <code>*_run</code> variables and the order from <a href="0009-capstone-drop-5-and-the-contract.html">lesson 9</a> (start from <a href="https://cloud.google.com/composer/docs">Cloud Composer</a> for scheduling and Delta's <a href="https://docs.delta.io/latest/delta-streaming.html">streaming reads and writes</a>)</td></tr>
+<tr><td><code>terraform plan</code> in CI, with Workload Identity Federation instead of keys</td><td>CI runs <code>validate</code>, but <code>plan</code> needs credentials, and that's the hard part</td></tr>
+<tr><td>Writing a contract before the data arrives</td><td>you passed one today. Next time, write one with the consumer</td></tr>
+<tr><td>Cost: reading the bill per batch, sizing executors</td><td>batches are billed per second in DCU, with a one-minute minimum (<a href="https://cloud.google.com/dataproc-serverless/pricing">pricing</a>). Start from your labels in <a href="0001-your-buckets-and-your-first-batch.html">lesson 1</a>'s stretch</td></tr>
+<tr><td>Catalogs and other table formats: Dataplex, Unity Catalog, Iceberg, Hudi</td><td>this week used Delta and bucket paths only. Start from <a href="https://cloud.google.com/dataplex/docs">Dataplex</a> when a client asks "where is the list of our tables?"</td></tr>
+<tr><td>A client's or employer's house conventions: naming, layer names, tooling</td><td>this week's glossary is one convention, and Monday's war story was one platform's, not a reference stack. Ask for the client's architecture document in week one and map its words onto landing, bronze, silver and gold.</td></tr>
+</table>
+
+<h2>6. Where to keep learning</h2>
+<p>From Monday there's no review pair or course channel. Practitioners answer questions here:</p>
+<ul>
+<li><a href="https://delta.io/community/">Delta Lake community Slack</a>: maintainers answer MERGE and schema questions the docs don't cover.</li>
+<li><a href="https://discuss.google.dev/gc/forums/filteredbylabelpage/board-id/cloud-data-analytics/label-name/Dataproc">Google Cloud Community, Dataproc</a>: batch failures that aren't in the docs.</li>
+<li><a href="https://www.reddit.com/r/dataengineering/">r/dataengineering</a>: "how do others do medallion in practice". Read it critically, against the glossary you used all week.</li>
+</ul>
+<p>A good first post: your pipeline's diagram, your quarantine rules, and one question you couldn't settle this week.</p>
+
+<h2>7. Check yourself</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>8. Primary source</h2>
+<p><a href="https://docs.cloud.google.com/bigquery/docs/create-delta-lake-table">BigQuery: create Delta Lake tables</a> (15 minutes), including its limitations list. It's the page you'll open when a client says "can we just query it from BigQuery?".</p>
+
+<div class="aside"><span class="label">Where to ask</span>The instructor is in the room. Demos at 15:00: <a href="0009-capstone-drop-5-and-the-contract.html#demo">the checklist</a> is in lesson 9. The repo and the lessons stay open after today.</div>
+
+<nav class="lesson-nav"><span><a href="0009-capstone-drop-5-and-the-contract.html">← Lesson 9</a></span><span><a href="../reference/glossary.html">Glossary →</a></span></nav>
+</main>
+<script src="../assets/hints.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+Hints.render("ex-bq", {
+  hint1: "<p>Section 1's DDL twice, one per table name. Then one <code>SELECT</code> on <code>nutriscore_by_category</code>, filtered to France and grouped by category.</p><p><code>Not found: Connection</code>: the connection id is in the Teams channel header next to the project id, and its region must be <code>europe-west1</code>, the same as your bucket. <code>Access Denied</code> on the bucket: say so in the channel. The bootstrap grants it, so it's the instructor's fix, not yours.</p>",
+  hint2: "<p>The share is <code>SUM(IF(nutrition_grade_fr = 'e', products, 0)) / SUM(products)</code>. Sort on it.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day5/bigquery.sql"
+});
+Quiz.render("quiz1", [
+  { prompt: "An analyst asks for a column to be renamed in the BigQuery external table. Where does the change go?",
+    options: ["In gold.py, as a new gold column name", "In BigQuery, with an ALTER TABLE statement", "In the Looker Studio data source settings"],
+    answer: 0,
+    explain: "The schema comes from the Delta log and can't be edited in BigQuery. Gold is shaped for its consumers, so the name belongs in the gold job." },
+  { prompt: "A chart needs average sugar per country. Neither gold table has it. What do you do?",
+    options: ["Add a gold table shaped for that question", "Compute it in a Looker calculated field", "Query silver directly from Looker Studio"],
+    answer: 0,
+    explain: "One gold table, one question. Dashboard logic is untested and hidden from the next reader. Consumers never read silver." },
+  { prompt: "You delete <code>gs://…-gold/brands_sugar</code> by mistake. What does a query on its external table return?",
+    options: ["An error: the files it points at are gone", "The rows BigQuery copied at creation", "The last cached result, until refresh"],
+    answer: 0,
+    explain: "The external table is metadata only: a path and a connection. With the files gone there's nothing to read, so the query fails. BigQuery never copied the rows, not at creation and not later." }
+]);
+</script>
+</body></html>

@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Leçon 3 — Landing → bronze, testé et lancé en batch</title>
+<link rel="stylesheet" href="../../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="../0003-landing-to-bronze.html" hreflang="en" lang="en">English</a></p>
+<h1>Landing → bronze, testé et lancé en batch</h1>
+<p class="subtitle">Leçon 3 · mardi 13h15 · Ton premier hop : une fonction, un test, un batch, et le drop 2</p>
+<div class="meta"><span>≈ 3 heures</span><span>Prérequis : <a href="0002-dataframes-and-delta-locally.html">leçon 2</a> (les cinq gestes)</span><span>Référence : <a href="../../reference/pyspark-delta-cheatsheet.html">PySpark &amp; Delta cheat sheet</a> (en anglais) · <a href="../../reference/terraform-and-gcloud-cheatsheet.html">Terraform &amp; gcloud</a> (en anglais) · <a href="../../reference/glossary.html">glossaire</a> (en anglais)</span></div>
+
+<div class="aside mission"><span class="label">Pourquoi cette leçon</span>
+Les cinq gestes de ce matin deviennent le premier <strong>hop</strong> de ton pipeline. Même code, deux appelants : un test sur ton laptop (quelques secondes) et un batch sur GCS (quelques minutes). Une fois que ça marche, la gate te donne le drop 2. Et là, les ennuis du silver commencent.</div>
+
+<h2>1. Une fonction, deux appelants</h2>
+<p>Cette semaine, chaque hop est une fonction qui prend une session Spark et des chemins. Un bloc <code>__main__</code> construit la session et lit les chemins dans <code>sys.argv</code>. Le test passe des dossiers temporaires, le batch passe des chemins de bucket. La fonction, elle, ne sait jamais lequel des deux l'appelle.</p>
+<pre><code><span class="c"># learners/&lt;handle&gt;/jobs/bronze.py: the skeleton. You write the body.</span>
+<span class="k">import</span> sys
+<span class="k">from</span> pyspark.sql <span class="k">import</span> SparkSession, functions <span class="k">as</span> F
+
+
+<span class="k">def</span> load_bronze(spark, landing, bronze):
+    ...  <span class="c"># read every CSV under landing, stamp it, append it to the Delta table at bronze</span>
+
+
+<span class="k">if</span> __name__ == <span class="s">"__main__"</span>:
+    spark = (SparkSession.builder.appName(<span class="s">"bronze"</span>)
+             .config(<span class="s">"spark.sql.extensions"</span>, <span class="s">"io.delta.sql.DeltaSparkSessionExtension"</span>)
+             .config(<span class="s">"spark.sql.catalog.spark_catalog"</span>, <span class="s">"org.apache.spark.sql.delta.catalog.DeltaCatalog"</span>)
+             .getOrCreate())
+    load_bronze(spark, sys.argv[1], sys.argv[2])
+    <span class="k">print</span>(<span class="s">"bronze rows:"</span>, spark.read.format(<span class="s">"delta"</span>).load(sys.argv[2]).count())</code></pre>
+
+<h2>2. Exercice : le test d'abord <span class="tier core">core</span></h2>
+<p>Avant de coder, écris l'ordre que tu vas suivre : test, corps, batch, puis la gate (<code>drop next</code>, section 4). Puis démarre.</p>
+<ol>
+<li>Enregistre ça dans <code>tests/test_bronze.py</code>. Il utilise la fixture <code>spark</code> du template (<code>conftest.py</code>) et le <code>tmp_path</code> de pytest (<a href="https://docs.pytest.org/en/stable/how-to/tmp_path.html">pytest: temporary directories</a>).</li>
+<li>Lance <code>uv run pytest tests/test_bronze.py</code> depuis <code>learners/&lt;handle&gt;/</code> et regarde-le échouer.</li>
+<li>Remplis <code>load_bronze</code> avec les gestes 1 à 3 de la <a href="0002-dataframes-and-delta-locally.html">leçon 2</a> jusqu'à ce qu'il passe.</li>
+</ol>
+<pre><code><span class="k">from</span> jobs.bronze <span class="k">import</span> load_bronze
+
+
+<span class="k">def</span> test_every_landed_row_is_stamped(spark, tmp_path):
+    landing = tmp_path / <span class="s">"landing"</span>; landing.mkdir()
+    (landing / <span class="s">"a.csv"</span>).write_text(<span class="s">"code,sugars_100g\n001,45\n002,0\n"</span>)
+    (landing / <span class="s">"b.csv"</span>).write_text(<span class="s">"code,sugars_100g\n001,44\n"</span>)
+
+    load_bronze(spark, str(landing), str(tmp_path / <span class="s">"bronze"</span>))
+
+    b = spark.read.format(<span class="s">"delta"</span>).load(str(tmp_path / <span class="s">"bronze"</span>))
+    got = sorted((r.code, r.sugars_100g, r.source_file.split(<span class="s">"/"</span>)[-1])
+                 <span class="k">for</span> r <span class="k">in</span> b.select(<span class="s">"code"</span>, <span class="s">"sugars_100g"</span>, <span class="s">"source_file"</span>).collect())
+    <span class="k">assert</span> got == [(<span class="s">"001"</span>, <span class="s">"44"</span>, <span class="s">"b.csv"</span>), (<span class="s">"001"</span>, <span class="s">"45"</span>, <span class="s">"a.csv"</span>), (<span class="s">"002"</span>, <span class="s">"0"</span>, <span class="s">"a.csv"</span>)]
+    <span class="k">assert</span> b.filter(<span class="s">"loaded_at IS NULL"</span>).count() == 0</code></pre>
+<p>L'assertion compare des <em>lignes</em>, pas un count. Si le job perdait <code>001,44</code> et doublait <code>002</code>, un count dirait quand même trois. Le <code>001</code> en double est normal : le bronze le garde.</p>
+<p><strong>C'est bon quand</strong> tu as <code>1 passed</code>.</p>
+<div class="hints" id="ex-test"></div>
+
+<h2>3. Exercice : la même fonction en batch <span class="tier core">core</span></h2>
+<p>Avec trois hops, le numéro de run unique de la <a href="0001-your-buckets-and-your-first-batch.html">leçon 1</a> relancerait les trois. Du coup, chaque hop a le sien. Le <code>variables.tf</code> du template a déjà <code>bronze_run</code> et <code>drop</code>. Mets leurs valeurs actuelles dans <code>terraform.tfvars</code> (il est commité). Sandbox : ici, c'est toi l'ordonnanceur. Sur un projet client, un orchestrateur soumet chaque hop dans cet ordre toutes les nuits. Quelqu'un est alerté quand l'un d'eux échoue (<a href="0010-gold-in-bigquery.html">leçon 10</a>, section 5).</p>
+<pre><code>resource <span class="s">"google_storage_bucket_object"</span> <span class="s">"bronze_job"</span> {
+  bucket = google_storage_bucket.landing.name
+  name   = <span class="s">"jobs/bronze.py"</span>
+  source = <span class="s">"${path.module}/../jobs/bronze.py"</span>
+}
+
+resource <span class="s">"google_dataproc_batch"</span> <span class="s">"bronze"</span> {
+  batch_id = <span class="s">"${var.handle}-bronze-${var.bronze_run}"</span>
+  location = <span class="s">"europe-west1"</span>
+  runtime_config {
+    version    = <span class="s">"3.0"</span>
+    properties = { <span class="s">"spark.dynamicAllocation.maxExecutors"</span> = <span class="s">"2"</span> } <span class="c"># sandbox: drops are KBs, a client's GB a day needs executor sizing (lesson 10, section 5)</span>
+  }
+  environment_config {
+    execution_config {
+      service_account = var.service_account
+      ttl             = <span class="s">"1800s"</span> <span class="c"># a hung batch is killed after 30 min</span>
+      authentication_config {
+        user_workload_authentication_type = <span class="s">"SERVICE_ACCOUNT"</span> <span class="c"># the API sets this: declare it or every apply replaces the batch</span>
+      }
+    }
+  }
+  pyspark_batch {
+    main_python_file_uri = <span class="s">"gs://${google_storage_bucket_object.bronze_job.bucket}/${google_storage_bucket_object.bronze_job.name}"</span>
+    args = [
+      <span class="s">"gs://${google_storage_bucket.landing.name}/drop${var.drop}/"</span>,
+      <span class="s">"gs://${google_storage_bucket.bronze.name}/products"</span>,
+    ]
+  }
+}</code></pre>
+<pre><code><span class="c"># terraform.tfvars</span>
+drop       = 1
+bronze_run = 1</code></pre>
+<pre><code>terraform apply
+gcloud dataproc batches wait &lt;handle&gt;-bronze-1 --region=europe-west1   <span class="c"># streams the driver output</span></code></pre>
+<p><code>batches wait</code> affiche la sortie « pendant le run ou une fois qu'il est fini » (<a href="https://docs.cloud.google.com/sdk/gcloud/reference/dataproc/batches/wait">gcloud reference</a>). <strong>C'est bon quand</strong> la sortie se termine par <code>bronze rows: N</code>, N étant le nombre de lignes de données du drop 1. Un batch qui a planté garde son id. Corrige le job, puis incrémente le numéro de run, sinon le prochain apply répond <code>Error 409: Already exists</code>.</p>
+<div class="hints" id="ex-batch"></div>
+
+<div class="aside warn"><span class="label">Lance-le deux fois et le bronze double</span>
+Refais un apply avec <code>bronze_run = 2</code> et le même drop : chaque ligne du drop 1 est ajoutée une deuxième fois. C'est normal, c'est le bronze qui fait son boulot (il garde chaque chargement, avec son <code>source_file</code> et son <code>loaded_at</code>). Demain, le silver merge les copies en une seule ligne sur <code>code</code>. Mais du coup, tu ne relances que quand tu le veux vraiment. Change <code>drop</code> et <code>bronze_run</code> ensemble, et ne change jamais les <code>args</code> d'un batch sans nouveau numéro de run.</div>
+
+<h2>4. La gate, et le drop 2 <span class="tier core">core</span></h2>
+<pre><code>drop next</code></pre>
+<p>La gate vérifie que chaque ligne du drop 1 est dans ta table bronze, avec un <code>source_file</code> et un <code>loaded_at</code>. Si elle refuse, son message dit ce qu'elle n'a pas trouvé. Quand elle passe :</p>
+<ol>
+<li>Le drop 2 arrive dans <code>gs://kuikops-lakehouse-&lt;handle&gt;-landing/drop2/</code>.</li>
+<li>Charge-le dans le bronze de la même façon (<code>drop = 2</code>, <code>bronze_run = 3</code> ou le numéro suivant).</li>
+<li>Ouvre les fichiers et note trois trucs qui ont l'air faux. Ne les corrige pas : le bronze ne nettoie jamais, c'est le boulot de demain.</li>
+</ol>
+<p>Refusé deux fois avec la même ligne ? Poste-la sur Teams avec ton handle, puis <code>drop next --force</code>. C'est tracé avec ton handle et l'heure, le formateur le voit, tu le dis dans ta PR, et <code>gcloud storage rm -r gs://kuikops-lakehouse-&lt;handle&gt;-landing/drop2/</code> l'annule. Uniquement en sandbox : sur un projet client, rien ne te donne le fichier suivant, et un check qui échoue bloque le chargement jusqu'à ce que quelqu'un corrige la cause.</p>
+<p><strong>C'est bon quand</strong> le drop 2 est dans le bronze et que tu as noté trois trucs qui ont l'air faux.</p>
+<div class="hints" id="ex-gate"></div>
+
+<h2>5. La PR <span class="tier core">core</span></h2>
+<p>Sur la branche <code>&lt;handle&gt;/bronze</code>, commit <code>jobs/bronze.py</code>, <code>tests/test_bronze.py</code> et les changements Terraform. La CI lance tes tests et <code>terraform validate</code>. CI verte plus l'approbation de ton binôme, et c'est mergé. Ton binôme vérifie un truc en premier : est-ce que le job <em>modifie</em> une valeur qu'il a lue ? Si oui, cette ligne a sa place dans le silver.</p>
+
+<h2>6. Stretch : refuser un replay <span class="tier stretch">stretch</span></h2>
+<p>Fais en sorte que <code>load_bronze</code> saute les fichiers déjà présents dans le <code>source_file</code> du bronze. Comme ça, le même drop appliqué deux fois n'ajoute rien. Un join <code>left_anti</code> sur <code>source_file</code> contre la table fait le job (<a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.join.html"><code>DataFrame.join</code></a>). Le test d'abord : deux appels avec le même dossier donnent trois lignes, pas six. Ensuite, dis dans la PR si ça a sa place dans le bronze tout court. Un replay, c'est une erreur à empêcher ou un fait à enregistrer ?</p>
+
+<h2>7. Vérifie-toi</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>8. Source primaire</h2>
+<p><a href="https://docs.cloud.google.com/dataproc-serverless/docs/overview">Serverless for Apache Spark overview</a> (10 minutes) : ce qu'est un batch, ce que Google gère pour toi, et où vont les logs. Ensuite, survole les flags de <a href="https://docs.cloud.google.com/sdk/gcloud/reference/dataproc/batches/submit/pyspark"><code>batches submit pyspark</code></a>. C'est ton plan B quand Terraform te bloque.</p>
+
+<div class="aside"><span class="label">Où demander</span>Ton binôme de review d'abord, puis le canal Teams. Poste ta ligne de 16h30 : sur quel drop tu es, ce qui te bloque. Les solutions du jour sont débloquées à 17h00. Demain matin : <a href="0004-silver-rules-and-quarantine.html">leçon 4, les règles du silver et la quarantine</a>.</div>
+
+<nav class="lesson-nav"><span><a href="0002-dataframes-and-delta-locally.html">← Leçon 2</a></span><span><a href="0004-silver-rules-and-quarantine.html">Leçon 4 : les règles du silver et la quarantine →</a></span></nav>
+</main>
+<script src="../../assets/hints.js"></script>
+<script src="../../assets/quiz.js"></script>
+<script>
+Hints.render("ex-test", {
+  hint1: "<p>Le corps, c'est les gestes 1 à 3 de la <a href=\"0002-dataframes-and-delta-locally.html\">leçon 2</a>, avec <code>landing</code> et <code>bronze</code> à la place des chemins temporaires : lecture avec <code>header</code>, <code>select(\"*\", …)</code> des deux tampons, écriture <code>delta</code> en mode <code>append</code>. Pas de cast, pas de filtre, pas de dédup.</p>",
+  hint2: "<p><code>ModuleNotFoundError: jobs</code> : lance pytest depuis <code>learners/&lt;handle&gt;/</code>. Le <code>pyproject.toml</code> du template met ce dossier dans le path. Si l'assertion montre <code>file:/…/a.csv</code> là où tu attendais <code>a.csv</code>, sache que le test garde déjà le dernier segment du chemin. Vérifie que tu as bien nommé le tampon <code>source_file</code>, pas <code>file_path</code>.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day2/jobs/bronze.py"
+});
+Hints.render("ex-batch", {
+  hint1: "<p>Mets ce bloc à côté du batch hello de la <a href=\"0001-your-buckets-and-your-first-batch.html\">leçon 1</a> : seuls le nom de l'objet, la variable de run dans <code>batch_id</code> et les deux <code>args</code> changent. Mets <code>drop</code> et <code>bronze_run</code> dans <code>terraform.tfvars</code>, puis fais un apply.</p>",
+  hint2: "<p><code>Path does not exist</code> dans la sortie : le chemin du landing est faux. Liste-le avec <code>gcloud storage ls gs://kuikops-lakehouse-&lt;handle&gt;-landing/</code>. Les dossiers de drop s'appellent <code>drop1/</code>, pas <code>drop_1/</code>. Si <code>apply</code> dit que le batch existe déjà, tu as changé <code>drop</code> mais pas <code>bronze_run</code>. Terraform te bloque ? Regarde les flags de <a href=\"https://docs.cloud.google.com/sdk/gcloud/reference/dataproc/batches/submit/pyspark\"><code>batches submit pyspark</code></a> : les arguments après <code>--</code> deviennent <code>sys.argv[1:]</code>.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day2/terraform/bronze.tf"
+});
+Hints.render("ex-gate", {
+  hint1: "<p>La gate lit <code>gs://…-bronze/products</code>, le deuxième arg de ton batch bronze. Vérifie que la sortie du dernier batch finissait par <code>bronze rows: N</code> pour le drop 1.</p>",
+  hint2: "<p><code>N of M drop-1 rows are not in …</code> : ton batch a lu un autre dossier (<code>drop</code> ne valait pas 1) ou a écrit dans un autre chemin. <code>no Delta table at …</code> : le batch n'a jamais écrit, donc lis son <code>Traceback</code>.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day2/terraform/bronze.tf"
+});
+Quiz.render("quiz1", [
+  { prompt: "Ton test bronze vérifie seulement <code>b.count() == 3</code>. Lequel de ces bugs laisse-t-il passer ?",
+    options: ["Toutes les lignes tamponnées a.csv en source_file", "Seul le premier fichier CSV du landing est lu", "La ligne d'en-tête chargée comme une donnée"],
+    answer: 0,
+    explain: "Un mauvais tampon ne change aucun count : trois lignes restent trois, donc seule la comparaison des lignes l'attrape. Lire un seul fichier donne deux lignes, et sans l'option header on ajoute des lignes d'en-tête, donc un count attrape les deux." },
+  { prompt: "Tu fais un apply avec une nouvelle valeur de <code>drop</code> mais le même <code>bronze_run</code>. Que veut faire Terraform ?",
+    options: ["Remplacer le batch sous le même id", "Lancer un second batch avec un nouvel id", "Rien, un batch ne change jamais"],
+    answer: 0,
+    explain: "Un batch ne peut pas être mis à jour. Des <code>args</code> modifiés veulent donc dire un remplacement sous le même <code>batch_id</code>. Lis le plan et incrémente plutôt le numéro de run." },
+  { prompt: "Le drop 2 contient une ligne avec un code-barres vide. Qu'en fait le bronze ?",
+    options: ["Il l'ajoute, tamponnée, comme toutes", "Il la saute, faute de business key", "Il l'envoie en quarantine avec sa règle"],
+    answer: 0,
+    explain: "Le bronze ne décide jamais rien. La quarantine est à côté du <em>silver</em>, et rejeter un <code>code</code> vide, c'est la première règle de demain." }
+]);
+</script>
+</body></html>

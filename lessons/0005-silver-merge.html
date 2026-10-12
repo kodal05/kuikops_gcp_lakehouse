@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lesson 5 — Silver: MERGE on the business key</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="fr/0005-silver-merge.html" hreflang="fr" lang="fr">Français</a></p>
+<h1>Silver: MERGE on the business key</h1>
+<p class="subtitle">Lesson 5 · Wednesday 13:15 · One row per barcode, the latest version wins, and a re-run changes nothing</p>
+<div class="meta"><span>≈ 3 hours</span><span>Prerequisite: <a href="0004-silver-rules-and-quarantine.html">lesson 4</a> (<code>split</code> passing)</span><span>Reference: <a href="../reference/pyspark-delta-cheatsheet.html">PySpark &amp; Delta cheat sheet</a> · <a href="../reference/glossary.html">glossary</a></span></div>
+
+<div class="aside mission"><span class="label">Why this lesson</span>
+"One row per business entity" is the line a client will hold you to. Bronze has the same barcode several times:
+<ul>
+<li>duplicates inside a drop</li>
+<li>the same product again in a later drop</li>
+<li>sometimes an <em>older</em> version after a newer one</li>
+</ul>
+This afternoon silver keeps one row per <code>code</code>, the latest <code>last_modified</code>, whatever the drop order and however many runs.</div>
+
+<h2>1. MERGE in one picture</h2>
+<p>A Delta <code>MERGE</code> joins a <em>source</em> (new rows) to a <em>target</em> (the table) on a condition. It handles matched and unmatched rows in one atomic commit (<a href="https://docs.delta.io/delta-update/">Delta: table deletes, updates and merges</a>):</p>
+<pre><code><span class="k">from</span> delta <span class="k">import</span> DeltaTable
+
+(DeltaTable.forPath(spark, silver).alias(<span class="s">"t"</span>)
+    .merge(source.alias(<span class="s">"s"</span>), <span class="s">"t.code = s.code"</span>)       <span class="c"># the business key</span>
+    .whenMatchedUpdateAll()                               <span class="c"># same barcode: overwrite the row</span>
+    .whenNotMatchedInsertAll()                            <span class="c"># new barcode: insert it</span>
+    .execute())</code></pre>
+
+<h2>2. Predict, then run: two traps</h2>
+<p>In a scratch script, build an empty Delta table (<code>code, n</code>) and a source of two rows, <code>("001","a")</code> and <code>("001","b")</code>. You'll run the MERGE above <strong>twice</strong>. First write down: how many rows after run one? And on run two?</p>
+<details class="hint"><summary><strong>What we saw</strong> <span class="sub">— open after you ran it</span></summary><div class="hint-body">
+<p>First run: <strong>2 rows</strong>, both <code>001</code>. No target row matched, so both went in, with no error. Second run: <code>[DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE] Cannot perform Merge as multiple source rows matched…</code>. It only fires once the target has the key.</p>
+<p>Second trap: a row with <code>code = null</code>. <code>null = null</code> isn't true in SQL, so it never matches and gets <em>inserted again on every run</em>. That's why <code>code_missing</code> runs in <code>split</code>, before the MERGE.</p></div></details>
+
+<h2>3. Two fixes, two lines each</h2>
+<p><strong>Make the source unique.</strong> Keep one row per <code>code</code>: latest <code>last_modified</code>, then latest load on a tie. A window does it (<a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/api/pyspark.sql.functions.row_number.html"><code>row_number</code></a>):</p>
+<pre><code>SILVER_COLUMNS = [<span class="s">"code"</span>, <span class="s">"product_name"</span>, <span class="s">"brands"</span>, <span class="s">"categories"</span>, <span class="s">"countries"</span>, <span class="s">"nutrition_grade_fr"</span>, <span class="s">"sugars_100g"</span>, <span class="s">"last_modified"</span>]   <span class="c"># lesson 4's good, minus loaded_at</span>
+<span class="k">from</span> pyspark.sql <span class="k">import</span> Window
+
+w = Window.partitionBy(<span class="s">"code"</span>).orderBy(F.desc(<span class="s">"last_modified"</span>), F.desc(<span class="s">"loaded_at"</span>))
+latest = good.withColumn(<span class="s">"_n"</span>, F.row_number().over(w)).filter(<span class="s">"_n = 1"</span>).select(*SILVER_COLUMNS)</code></pre>
+<p><strong>Never let an older row win.</strong> A late update is older than silver's row, so only update when the source is newer.</p>
+<pre><code>.whenMatchedUpdateAll(condition=<span class="s">"s.last_modified &gt; t.last_modified"</span>)</code></pre>
+<div class="aside key"><span class="label">Idempotent</span>
+With both fixes, a re-run on the same bronze changes no rows: every match fails the <code>&gt;</code> condition and nothing gets inserted. So a failed or repeated batch does no damage. On a client project an orchestrator retries a failed night run without asking you, and this is what makes that retry safe. Your pair tests this first in your PR. (Delta still commits a new version each run.)</div>
+
+<h2>4. Exercise: <code>merge_silver</code> <span class="tier core">core</span></h2>
+<p>Add <code>latest(good)</code> and <code>merge_silver(spark, good, silver)</code> to <code>jobs/silver.py</code>, and this test to <code>tests/test_silver.py</code> (load, late update, re-run, same rows each time):</p>
+<pre><code><span class="k">from</span> jobs.silver <span class="k">import</span> split, merge_silver
+
+
+<span class="k">def</span> silver_rows(spark, path):
+    <span class="k">return</span> sorted((r.code, r.product_name, r.last_modified)
+                  <span class="k">for</span> r <span class="k">in</span> spark.read.format(<span class="s">"delta"</span>).load(path).collect())
+
+
+<span class="k">def</span> test_latest_last_modified_wins_and_rerun_changes_nothing(spark, tmp_path):
+    path = str(tmp_path / <span class="s">"silver"</span>)
+    good, _ = split(bronze(spark,
+        (<span class="s">"001"</span>, <span class="s">"Choco"</span>,     <span class="s">"45"</span>, <span class="s">"2026-01-01"</span>),
+        (<span class="s">"001"</span>, <span class="s">"Choco bar"</span>, <span class="s">"44"</span>, <span class="s">"2026-02-01"</span>),   <span class="c"># newer: wins</span>
+        (<span class="s">"001"</span>, <span class="s">"Choco bar"</span>, <span class="s">"44"</span>, <span class="s">"2026-02-01"</span>),   <span class="c"># exact duplicate</span>
+        (<span class="s">"002"</span>, <span class="s">"Water"</span>,     <span class="s">"0"</span>,  <span class="s">"2026-01-01"</span>)))
+    merge_silver(spark, good, path)
+    late, _ = split(bronze(spark, (<span class="s">"002"</span>, <span class="s">"Old water"</span>, <span class="s">"0"</span>, <span class="s">"2025-12-01"</span>)))   <span class="c"># late update: older</span>
+    merge_silver(spark, late, path)
+    want = [(<span class="s">"001"</span>, <span class="s">"Choco bar"</span>, dt.date(2026, 2, 1)), (<span class="s">"002"</span>, <span class="s">"Water"</span>, dt.date(2026, 1, 1))]
+    <span class="k">assert</span> silver_rows(spark, path) == want
+    merge_silver(spark, good, path)
+    <span class="k">assert</span> silver_rows(spark, path) == want</code></pre>
+<p>The first run has no table to merge into, so create it empty: <code>if not DeltaTable.isDeltaTable(spark, silver): latest(good).limit(0).write.format("delta").save(silver)</code> (<a href="https://docs.delta.io/api/latest/python/spark/">DeltaTable API</a>).</p>
+<p><strong>Done when</strong> both silver tests pass.</p>
+<div class="hints" id="ex-merge"></div>
+
+<h2>5. Exercise: the silver batch, and drop 3 <span class="tier core">core</span></h2>
+<p>Set up the batch (the tests call <code>run</code> directly):</p>
+<ol>
+<li><code>run(spark, bronze, silver, quarantine)</code>: split, write quarantine (like this morning), then <code>merge_silver</code> the good side.</li>
+<li><code>__main__</code> only builds the session and calls <code>run(spark, *sys.argv[1:4])</code> with the bronze, <code>gs://…-silver/products</code> and quarantine paths.</li>
+<li>Bump <code>silver_run</code> and apply. Read the output with <code>gcloud dataproc batches wait &lt;handle&gt;-silver-&lt;n&gt; --region=europe-west1</code>. If it failed, read the last <code>Traceback</code> first. Then:</li>
+</ol>
+<pre><code>drop next</code></pre>
+<p>Refused twice with the same line? Post it in Teams with your handle, then <code>drop next --force</code> and name it in your PR (<a href="0003-landing-to-bronze.html">lesson 3</a>, section 4).</p>
+<p>The gate checks for one row per <code>code</code> in silver, and drop 2's barcode-less rows in quarantine under <code>code_missing</code>. Then:</p>
+<ol>
+<li>Load drop 3 into bronze and run silver again.</li>
+<li><strong>Read the rule counts before anything else</strong>. Write down which rule jumped.</li>
+<li>Look at three quarantined rows. Don't fix them today. Tomorrow you'll see why the fix belongs in silver, not gold.</li>
+<li>Open the PR <code>&lt;handle&gt;/silver</code> with <code>jobs/silver.py</code>, <code>tests/test_silver.py</code> and the Terraform changes, and ask your pair.</li>
+</ol>
+<p><strong>Done when</strong> drop 3 is through silver and you've written down which rule jumped.</p>
+<div class="hints" id="ex-drop3"></div>
+
+<h2>6. Stretch: prove it from the history <span class="tier stretch">stretch</span></h2>
+<p>After a re-run, <code>DeltaTable.forPath(spark, silver).history(1).select("operationMetrics").first()[0]</code> shows what the MERGE did. Print <code>numTargetRowsInserted</code> and <code>numTargetRowsUpdated</code> in the batch output (<a href="https://docs.delta.io/latest/delta-utility.html">table utility commands: history</a>). Run silver twice on the same bronze: both are <code>0</code> the second time. That's idempotence as a number from the log.</p>
+
+<h2>7. Check yourself</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>8. Primary source</h2>
+<p>Read two sections of the <a href="https://docs.delta.io/delta-update/">Delta "Table deletes, updates, and merges" page</a> (20 minutes). They're <em>Upsert into a table using merge</em> and <em>Data deduplication when writing into Delta tables</em>. Look for the sentence on multiple source rows matching one target row: you've met it.</p>
+
+<div class="aside"><span class="label">Where to ask</span>Your review pair first, then the Teams channel. 16:30 line: your drop, your rule counts on drop 3. Solutions unlock at 17:00. Tomorrow morning: <a href="0006-gold-never-cleans.html">lesson 6, gold</a>.</div>
+
+<nav class="lesson-nav"><span><a href="0004-silver-rules-and-quarantine.html">← Lesson 4</a></span><span><a href="0006-gold-never-cleans.html">Lesson 6: gold never cleans →</a></span></nav>
+</main>
+<script src="../assets/hints.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+Hints.render("ex-merge", {
+  hint1: "<p><code>latest</code> is section 3's window, returning <code>SILVER_COLUMNS</code> only (<code>loaded_at</code> is only for sorting). <code>merge_silver</code> creates the table if missing, then runs section 1's MERGE on <code>latest(good)</code> with section 3's condition.</p>",
+  hint2: "<p>If the second assertion fails with <code>Old water</code> in silver, your update branch has no condition. If the test raises <code>DELTA_MULTIPLE_SOURCE_ROW…</code>, the MERGE is reading <code>good</code>, not <code>latest(good)</code>. If silver gets a column <code>_n</code> or <code>loaded_at</code>, <code>latest</code> isn't selecting <code>SILVER_COLUMNS</code>.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day3/jobs/silver.py"
+});
+Hints.render("ex-drop3", {
+  hint1: "<p>Print the counts as <code>rejected.groupBy(\"rule\").count().show()</code>, and a sample of one rule with <code>rejected.filter(\"rule = 'sugars_not_a_number'\").select(\"code\", \"sugars_100g\", \"source_file\").show(5, False)</code>.</p>",
+  hint2: "<p>Gate says <code>… has N codes on more than one row</code>: silver was written without the MERGE, or the MERGE reads <code>good</code> instead of <code>latest(good)</code>. Gate says <code>… not in …/quarantine under rule code_missing</code>: <code>run</code> doesn't write the rejected side, or writes it to another path than the third arg.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day3/terraform/silver.tf"
+});
+Quiz.render("quiz1", [
+  { prompt: "Your <code>latest</code> window orders by <code>last_modified</code> only. Two <code>001</code> rows share a date but differ in name. What goes wrong?",
+    options: ["Either row can win, run to run", "The MERGE raises a multiple-match error", "Both rows are inserted into silver"],
+    answer: 0,
+    explain: "<code>row_number</code> still keeps one row per <code>code</code>, so the MERGE never sees two matches and nothing is doubled. But on a tie, which row gets number 1 isn't fixed, so silver can change between runs. That's why the window also orders by <code>loaded_at</code>." },
+  { prompt: "Drop 3 brings barcode <code>002</code> modified in 2025. Silver has it from 2026. What should happen?",
+    options: ["Silver keeps the 2026 row unchanged", "Silver takes the 2025 row: it is newer", "Silver keeps both rows of the barcode"],
+    answer: 0,
+    explain: "\"Latest wins\" means latest <code>last_modified</code>, not latest arrival. The update condition <code>s.last_modified &gt; t.last_modified</code> enforces it." },
+  { prompt: "Why must <code>code_missing</code> run before the MERGE, not after?",
+    options: ["A null key never matches, so it piles up", "MERGE raises an error on any null key", "Quarantine cannot be written after MERGE"],
+    answer: 0,
+    explain: "<code>null = null</code> isn't true, so a null-key row is inserted again on every run." }
+]);
+</script>
+</body></html>

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lesson 8 — Tests that prove the hop, and CI</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="fr/0008-tests-that-prove-the-hop.html" hreflang="fr" lang="fr">Français</a></p>
+<h1>Tests that prove the hop, and CI</h1>
+<p class="subtitle">Lesson 8 · Thursday 15:30 · Break your own code on purpose, see which test notices, and let CI tell everyone</p>
+<div class="meta"><span>≈ 75 minutes</span><span>Prerequisite: <a href="0005-silver-merge.html">lesson 5</a> tests passing, lesson 7 not needed first</span><span>Reference: <a href="../reference/pyspark-delta-cheatsheet.html">PySpark &amp; Delta cheat sheet</a> · <a href="../reference/glossary.html">glossary</a></span></div>
+
+<div class="aside mission"><span class="label">Why this lesson</span>
+Tomorrow the instructor reads every PR. Like a client reviewer, they won't run your code, they'll read your tests and the CI result. A green tick only means something if a wrong hop turns it red. So today you break the hop yourself.</div>
+
+<h2>1. What CI does with your PR</h2>
+<p>The shared repo's workflow (<code>.github/workflows/</code>) runs on every PR touching <code>learners/&lt;handle&gt;/</code>, only in your folder:</p>
+<ul>
+<li>it runs <code>uv run pytest</code> and <code>terraform validate</code></li>
+<li>it never runs a batch, touches GCS or <code>plan</code>s: it proves the code, not the cloud. On a client project a separate pipeline with its own credentials usually runs <code>plan</code> and <code>apply</code>, often in a project you can't touch (<a href="0010-gold-in-bigquery.html">lesson 10</a>, section 5)</li>
+<li>a red check blocks the merge</li>
+</ul>
+<p>When it's red:</p>
+<ol>
+<li>on the PR, open <em>Checks</em> and click the failing step</li>
+<li>search the log for <code>FAILED</code> or <code>Error:</code>. The first match names the test or the <code>.tf</code> file</li>
+<li>skip everything above it (setup logs)</li>
+</ol>
+
+<h2>2. Predict, then break <span class="tier core">core</span></h2>
+<p>One at a time, make each change in <code>jobs/silver.py</code>. <strong>Before running <code>uv run pytest tests/test_silver.py</code>, write down which test fails, and its message.</strong> Run, compare, undo.</p>
+<table>
+<tr><th>Mutation</th><th>Change</th></tr>
+<tr><td>A</td><td>Remove the condition: <code>.whenMatchedUpdateAll()</code> instead of <code>.whenMatchedUpdateAll(condition="s.last_modified &gt; t.last_modified")</code></td></tr>
+<tr><td>B</td><td>Skip the dedup: merge <code>good.select(*SILVER_COLUMNS)</code> instead of <code>latest(good)</code></td></tr>
+</table>
+<p><strong>Done when</strong> you've written a prediction for A and B, run both, and undone both, with <code>uv run pytest tests/test_silver.py</code> green again.</p>
+<details class="hint"><summary><strong>What we saw</strong> <span class="sub">— open after both runs</span></summary><div class="hint-body">
+<p><strong>A</strong>: <code>test_latest_last_modified_wins_and_rerun_changes_nothing</code> fails on its first assertion, with <code>Old water</code> and <code>2025-12-01</code> in silver. The late update won.</p>
+<p><strong>B</strong>: the same test, but most people guess the wrong message. It's <em>not</em> <code>DELTA_MULTIPLE_SOURCE_ROW…</code>. The first MERGE goes into an empty table, so all three <code>001</code> rows get inserted. The test fails on an <code>AssertionError</code> with duplicate barcodes (<a href="0005-silver-merge.html">lesson 5</a>). The MERGE error would only show on the second run. A test comparing rows catches it on the first.</p>
+<p>A test asserting <code>silver.count() == 2</code> would have passed mutation A. That's why you compare rows.</p></div></details>
+
+<h2>3. Exercise: run the whole hop twice <span class="tier core">core</span></h2>
+<p>So far each test checks one function. This one runs a whole hop through <code>run</code>, twice, like the batch. It checks your most important rule: a row without a barcode never reaches silver and lands in quarantine exactly once. In <code>tests/test_run.py</code>, you need:</p>
+<ul>
+<li>a landing folder in <code>tmp_path</code> with one CSV, all eight columns: one good row, one with an empty <code>code</code></li>
+<li><code>load_bronze</code>, then <code>silver.run(spark, bronze, silver, quarantine)</code> <strong>twice</strong></li>
+<li>two assertions on rows: silver's codes are <code>["001"]</code>, and quarantine has a single <code>(product_name, rule)</code> pair</li>
+</ul>
+<p>Then comment out the <code>code_missing</code> rule and run it. If it still passes, it's not testing what you think.</p>
+<p><strong>Done when</strong> the test passes, fails without the rule, and passes again with the rule back.</p>
+<div class="hints" id="ex-run"></div>
+
+<h2>4. Exercise: red, then green, in CI <span class="tier core">core</span></h2>
+<p>Branch <code>&lt;handle&gt;/tests</code>, then:</p>
+<ol>
+<li>First commit: the new test <em>and</em> mutation A. Push, open a draft PR, and find the failing test in the CI log (section 1's search).</li>
+<li>Second commit: undo the mutation. Push and watch it go green.</li>
+<li>Mark the PR ready and ask your pair to review. In the description, paste the red log line that named the problem.</li>
+</ol>
+<p><strong>Done when</strong> the PR shows one red and one green run, and is merged.</p>
+<div class="hints" id="ex-ci"></div>
+
+<h2>5. Stretch: the whole pipeline in one test <span class="tier stretch">stretch</span></h2>
+<p>Write <code>test_pipeline.py</code> with two drop folders: a duplicate, a late update, a null barcode, a <code>"12 g"</code>. Run bronze, silver and gold in order, then assert on each gold table's rows. It's your slowest test, so keep just one. It answers a reviewer's "does it work end to end?"</p>
+
+<h2>6. Check yourself, across the week</h2>
+<p>These questions mix every hop: recall across topics is harder, which makes it stick (<a href="https://doi.org/10.1177/1529100612453266">Dunlosky et al., 2013</a>).</p>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>7. Primary source</h2>
+<p><a href="https://docs.pytest.org/en/stable/how-to/fixtures.html">pytest: how to use fixtures</a>, sections on <em>scope</em> and <em>tmp_path</em> (15 minutes). Your <code>spark</code> fixture is session-scoped because a JVM per test would be really slow. <code>tmp_path</code> is per-test, so tests never share tables.</p>
+
+<div class="aside"><span class="label">Where to ask</span>Your review pair first, then the Teams channel. 16:30 line: your drop, your PR count, what you want the instructor to look at tomorrow. Tomorrow: <a href="0009-capstone-drop-5-and-the-contract.html">lesson 9, the capstone</a>.</div>
+
+<nav class="lesson-nav"><span><a href="0007-delta-history-restore-and-schema.html">← Lesson 7</a></span><span><a href="0009-capstone-drop-5-and-the-contract.html">Lesson 9: capstone →</a></span></nav>
+</main>
+<script src="../assets/hints.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+Hints.render("ex-run", {
+  hint1: "<p>The paths: <code>paths = [str(tmp_path / n) for n in (\"bronze\", \"silver\", \"quarantine\")]</code>, then <code>silver.run(spark, *paths)</code>. Import the module (<code>from jobs import silver</code>) so its name doesn't clash with the path variable.</p>",
+  hint2: "<p>If quarantine holds the <code>NoBarcode</code> row twice, your <code>run</code> appends quarantine instead of overwriting it (<a href=\"0004-silver-rules-and-quarantine.html\">lesson 4</a>, section 4). If silver holds a null <code>code</code>, the MERGE got rows before <code>split</code> filtered them.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day4/tests/test_run.py"
+});
+Hints.render("ex-ci", {
+  hint1: "<p>Same PR loop as <a href=\"0001-your-buckets-and-your-first-batch.html\">lesson 1</a>, section 5. On GitHub, open the arrow next to <em>Create pull request</em> and pick <a href=\"https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/creating-a-pull-request\"><em>Create draft pull request</em></a>. No CI run? Check that the files tab only shows <code>learners/&lt;handle&gt;/</code>.</p>",
+  hint2: "<p><code>terraform validate</code> fails but pytest passes? CI runs <code>terraform init -backend=false</code> first, so a syntax error or undeclared variable fails it. Run the same two commands in your <code>terraform/</code> folder to reproduce it.</p>",
+  solution: ""
+});
+Quiz.render("quiz1", [
+  { prompt: "Which layer may change the value of a column it read?",
+    options: ["Silver, and never any other layer", "Silver and gold, but never bronze", "Any layer, if the change is tested"],
+    answer: 0,
+    explain: "Bronze stores what landed. Gold reshapes (explode, group) but never fixes values. Typing, trimming and parsing are silver's job." },
+  { prompt: "Bronze on drop 4 fails with a schema mismatch. What is the right first move?",
+    options: ["Read which columns are new, then decide", "Set mergeSchema on the bronze write", "Drop the bronze table and reload all"],
+    answer: 0,
+    explain: "Each new or renamed column is a decision: a rename map or an explicit <code>ALTER TABLE ADD COLUMNS</code>, reviewed in a PR. <code>mergeSchema</code> would make the error go away, but it also accepts every surprise column after this one, and that's the guard you just tripped." },
+  { prompt: "Silver's batch failed halfway through its MERGE. What do you do before re-running it?",
+    options: ["Nothing: the MERGE never committed", "Restore silver to the version before", "Delete the half-written silver files"],
+    answer: 0,
+    explain: "A failed write leaves no commit, so silver is unchanged. The hop is idempotent, so the re-run is safe." },
+  { prompt: "You re-apply the bronze batch on a drop already loaded. What protects silver?",
+    options: ["The MERGE keeps one row per barcode", "Bronze refuses a file it has seen", "Delta deduplicates appended rows"],
+    answer: 0,
+    explain: "Bronze appends the copy (unless you did lesson 3's stretch). The <code>latest</code> window and the MERGE bring it back to one row per <code>code</code>." }
+]);
+</script>
+</body></html>

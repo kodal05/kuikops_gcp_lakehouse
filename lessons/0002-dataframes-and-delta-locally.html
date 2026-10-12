@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lesson 2 — DataFrames and Delta, locally</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="fr/0002-dataframes-and-delta-locally.html" hreflang="fr" lang="fr">Français</a></p>
+<h1>DataFrames and Delta, locally</h1>
+<p class="subtitle">Lesson 2 · Tuesday 09:45 · Read a file, stamp it, append it to Delta, and watch Delta refuse a bad one</p>
+<div class="meta"><span>≈ 60 minutes</span><span>Prerequisite: <a href="0001-your-buckets-and-your-first-batch.html">lesson 1</a>, drop 1 in your landing</span><span>Reference: <a href="../reference/glossary.html">glossary</a> · <a href="../reference/terraform-and-gcloud-cheatsheet.html">cheat sheet</a></span></div>
+
+<div class="aside mission"><span class="label">Why this lesson</span>
+This afternoon's landing→bronze batch is five moves: read, stamp, append, read back, and be refused. Practise them here, locally, on two tiny files. Bronze is the easiest hop, but a mistake there hurts most: every later layer trusts it. On a client project a source team you don't control feeds bronze, so a refused write is often your first sign they changed something.</div>
+
+<h2>1. One session, two configs</h2>
+<p>Delta is a table format: Parquet files plus a transaction log. Spark needs two settings for it (<a href="https://docs.delta.io/quick-start/">quick start</a>), already in a session-scoped fixture in the template's <code>tests/conftest.py</code>:</p>
+<pre><code><span class="k">from</span> delta <span class="k">import</span> configure_spark_with_delta_pip
+<span class="k">from</span> pyspark.sql <span class="k">import</span> SparkSession
+
+builder = (SparkSession.builder.master(<span class="s">"local[2]"</span>)
+  .config(<span class="s">"spark.sql.extensions"</span>, <span class="s">"io.delta.sql.DeltaSparkSessionExtension"</span>)
+  .config(<span class="s">"spark.sql.catalog.spark_catalog"</span>, <span class="s">"org.apache.spark.sql.delta.catalog.DeltaCatalog"</span>))
+spark = configure_spark_with_delta_pip(builder).getOrCreate()</code></pre>
+<p>On the batch runtime, keep the two <code>.config</code> lines but skip <code>configure_spark_with_delta_pip</code>: Delta is already on the classpath (see <a href="0001-your-buckets-and-your-first-batch.html">lesson 1</a>'s <code>hello.py</code>).</p>
+
+<h2>2. The five moves <span class="tier core">core</span></h2>
+<p>Save as <code>learners/&lt;handle&gt;/jobs/explore.py</code>, run with <code>uv run python -m jobs.explore</code>. <strong>Before you run it, write down what the four numbered <code>print</code> lines will show.</strong> Then compare.</p>
+<pre><code><span class="k">import</span> tempfile, os
+<span class="k">from</span> pyspark.sql <span class="k">import</span> functions <span class="k">as</span> F
+<span class="k">from</span> tests.conftest <span class="k">import</span> make_spark        <span class="c"># same builder as the fixture</span>
+spark = make_spark()
+
+d = tempfile.mkdtemp(); landing = <span class="s">f"{d}/landing"</span>; bronze = <span class="s">f"{d}/bronze"</span>
+os.makedirs(landing)
+open(<span class="s">f"{landing}/drop1.csv"</span>, <span class="s">"w"</span>).write(<span class="s">"code,product_name,sugars_100g,last_modified\n001,Choco,45,2026-01-01\n002,Water,0,2026-01-01\n"</span>)
+open(<span class="s">f"{landing}/drop2.csv"</span>, <span class="s">"w"</span>).write(<span class="s">"code,product_name,sugars_100g,last_modified\n001,Choco bar,44,2026-02-01\n,NoBarcode,1,2026-02-01\n003,Juice,10,2026-02-01\n"</span>)
+
+<span class="c"># move 1: read. Every column is a string; bronze keeps it that way.</span>
+raw = spark.read.option(<span class="s">"header"</span>, <span class="k">True</span>).csv(landing)
+
+<span class="c"># move 2: stamp. Which file, when.</span>
+stamped = raw.select(<span class="s">"*"</span>,
+    F.col(<span class="s">"_metadata.file_path"</span>).alias(<span class="s">"source_file"</span>),
+    F.current_timestamp().alias(<span class="s">"loaded_at"</span>))
+
+<span class="c"># move 3: append.</span>
+stamped.write.format(<span class="s">"delta"</span>).mode(<span class="s">"append"</span>).save(bronze)
+
+<span class="c"># move 4: read back.</span>
+b = spark.read.format(<span class="s">"delta"</span>).load(bronze)
+<span class="k">print</span>(<span class="s">"1. rows:"</span>, b.count())
+<span class="k">print</span>(<span class="s">"2. distinct source files:"</span>, b.select(<span class="s">"source_file"</span>).distinct().count())
+<span class="k">print</span>(<span class="s">"3. sugars type:"</span>, dict(b.dtypes)[<span class="s">"sugars_100g"</span>])
+
+<span class="c"># move 5: be refused. A drop with a new column.</span>
+<span class="k">try</span>:
+    stamped.withColumn(<span class="s">"extra"</span>, F.lit(1)).write.format(<span class="s">"delta"</span>).mode(<span class="s">"append"</span>).save(bronze)
+    <span class="k">print</span>(<span class="s">"4. appended"</span>)
+<span class="k">except</span> Exception <span class="k">as</span> e:
+    <span class="k">print</span>(<span class="s">"4. refused:"</span>, str(e).splitlines()[0][:80])</code></pre>
+<p><strong>Done when</strong> you've written four predictions, run the script, and checked each one against section 3.</p>
+<div class="hints" id="ex-moves"></div>
+
+<h2>3. What you just saw</h2>
+<table>
+<tr><th>Line</th><th>Value</th><th>Why</th></tr>
+<tr><td>1</td><td>5</td><td>Two files, five rows. Bronze appends, so the duplicate <code>001</code> is two rows, correctly.</td></tr>
+<tr><td>2</td><td>2</td><td>Each row's file. <code>_metadata.file_path</code> replaces <code>input_file_name()</code> (<a href="https://docs.databricks.com/aws/ingestion/file-metadata-column">file metadata column</a>).</td></tr>
+<tr><td>3</td><td><code>string</code></td><td>CSV gives strings and bronze doesn't cast. Typing is silver's job, and silver's risk.</td></tr>
+<tr><td>4</td><td>refused: <em>A schema mismatch detected…</em></td><td>Schema enforcement: the whole write fails, nothing partial lands (<a href="https://docs.delta.io/latest/delta-batch.html">batch writes: schema validation</a>).</td></tr>
+</table>
+<div class="aside key"><span class="label">The war story: why bronze refuses new columns</span>
+Line 4 is why you can trust bronze. The option <code>mergeSchema</code>, or the session setting <code>spark.databricks.delta.schema.autoMerge.enabled</code>, turns the refusal into a new column with no error. The Delta docs call autoMerge "not recommended because it can lead to unintended schema changes". A real platform ran with autoMerge on: a renamed supplier column became a new null column, and nobody saw an error. Drop 4 will tempt you: a new column is a <em>decision</em>, not a default.</div>
+
+<h2>4. Exercise: history <span class="tier core">core</span></h2>
+<p>Add these lines to <code>explore.py</code> and predict the output before running:</p>
+<pre><code><span class="k">from</span> delta <span class="k">import</span> DeltaTable
+<span class="k">print</span>(<span class="s">"5."</span>, [(r.version, r.operation) <span class="k">for</span> r <span class="k">in</span> DeltaTable.forPath(spark, bronze).history().select(<span class="s">"version"</span>, <span class="s">"operation"</span>).collect()])
+<span class="k">print</span>(<span class="s">"6."</span>, spark.read.format(<span class="s">"delta"</span>).option(<span class="s">"versionAsOf"</span>, 0).load(bronze).count())</code></pre>
+<p><strong>Done when</strong> you can say, without looking, how many versions there are and why the refused write isn't one (<a href="https://docs.delta.io/latest/delta-utility.html">table utility commands</a>).</p>
+<div class="hints" id="ex-history"></div>
+
+<h2>5. Stretch: the cast that bites <span class="tier stretch">stretch</span></h2>
+<p>Drop 3 will deliver quantities like <code>"12 g"</code>. Run <code>spark.createDataFrame([("12 g",)], ["q"]).select(F.col("q").cast("double")).show()</code> locally. It raises instead of returning null: ANSI mode is on by default (<a href="https://spark.apache.org/docs/4.0.0/sql-migration-guide.html">migration guide</a>).</p>
+<ol>
+<li>Find the function in <a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/functions.html"><code>pyspark.sql.functions</code></a> that returns null instead.</li>
+<li>Write down which layer should use it.</li>
+<li>Write down what should happen to the row that became null.</li>
+</ol>
+
+<h2>6. Check yourself</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>7. Primary source</h2>
+<p>The <a href="https://docs.delta.io/latest/delta-batch.html">Delta "Table batch reads and writes" page</a> (15 minutes), everything bronze does:</p>
+<ul>
+<li><em>Write to a table</em></li>
+<li><em>Schema validation</em></li>
+<li><em>Query an older snapshot</em></li>
+</ul>
+
+<div class="aside"><span class="label">Where to ask</span>Your review pair first, then the Teams channel. Pair away? Ask the next handle on the roster in Teams. The instructor reads it this evening. Stand-up is at 09:30, and this lesson starts right after. This afternoon: <a href="0003-landing-to-bronze.html">lesson 3, landing→bronze as a tested job and a batch</a>.</div>
+
+<nav class="lesson-nav"><span><a href="0001-your-buckets-and-your-first-batch.html">← Lesson 1</a></span><span><a href="0003-landing-to-bronze.html">Lesson 3: landing → bronze →</a></span></nav>
+</main>
+<script src="../assets/hints.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+Hints.render("ex-moves", {
+  hint1: "<p>Predict from the comment above each move: move 1 says what type every column has, move 3 appends both files, move 5 writes a column the table doesn't have.</p>",
+  hint2: "<p><code>ModuleNotFoundError: tests</code>: run from <code>learners/&lt;handle&gt;/</code>, not <code>jobs/</code>, or set <code>PYTHONPATH=.</code>. Long Java stack trace? Read the first line after <code>Exception</code>.</p><p>If line 4 prints <code>appended</code>, your session turns on schema evolution. Check <code>spark.conf.get(\"spark.databricks.delta.schema.autoMerge.enabled\")</code> and the write options: neither should be set.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day2/jobs/explore.py"
+});
+Hints.render("ex-history", {
+  hint1: "<p>Each successful write is a commit. Count the successful writes in the script.</p>",
+  hint2: "<p>Versions start at 0. A refused write never commits, so it leaves no version. <code>versionAsOf 0</code> reads the table as it was after the first commit.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day2/jobs/explore.py"
+});
+Quiz.render("quiz1", [
+  { prompt: "Bronze gets the same file twice by mistake. What should it do with the second load?",
+    options: ["Append it again, stamped with its load time", "Skip it because the source file is known", "Merge it so each barcode stays unique"],
+    answer: 0,
+    explain: "Bronze keeps every landed row with its stamp and never decides. Silver dedups by merging on the business key, and the stamp is how it spots the replay." },
+  { prompt: "A Delta write fails halfway through its second file. What does a reader see?",
+    options: ["The table exactly as before the write began", "The rows from the first file, not the second", "Nothing until the writer is restarted"],
+    answer: 0,
+    explain: "A Delta write is one atomic commit to the log. No commit, no version, no partial rows." },
+  { prompt: "Drop 3 delivers <code>\"12 g\"</code> in <code>sugars_100g</code>. What does bronze's append do with that row?",
+    options: ["Appends it, the column is a string anyway", "Fails: the value can't be cast to double", "Appends it with sugars_100g set to null"],
+    answer: 0,
+    explain: "Bronze never casts, so every CSV column stays a string and <code>\"12 g\"</code> lands as it came. Failing on the cast, or nulling the value, would mean bronze typing the column. Typing is silver's rule, where a failure goes to quarantine." }
+]);
+</script>
+</body></html>

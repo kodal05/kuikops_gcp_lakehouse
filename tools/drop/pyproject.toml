@@ -1,0 +1,20 @@
+[project]
+name = "drop"
+version = "0.1.0"
+description = "Course gate CLI: drop next [--force], drop check silver"
+requires-python = "==3.12.*"
+# Same pins as the Serverless for Apache Spark runtime 3.0 the batches run on.
+dependencies = ["pyspark==4.0.1", "delta-spark==4.0.0", "datacontract-cli[dataframe]==1.2.4"]
+
+[project.scripts]
+drop = "drop:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["drop"]

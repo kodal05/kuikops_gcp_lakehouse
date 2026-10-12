@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Leçon 5 — Silver : MERGE sur la business key</title>
+<link rel="stylesheet" href="../../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="../0005-silver-merge.html" hreflang="en" lang="en">English</a></p>
+<h1>Silver : MERGE sur la business key</h1>
+<p class="subtitle">Leçon 5 · mercredi 13h15 · Une ligne par code-barres, la version la plus récente gagne, et un re-run ne change rien</p>
+<div class="meta"><span>≈ 3 heures</span><span>Prérequis : <a href="0004-silver-rules-and-quarantine.html">leçon 4</a> (<code>split</code> qui passe)</span><span>Référence : <a href="../../reference/pyspark-delta-cheatsheet.html">PySpark &amp; Delta cheat sheet</a> (en anglais) · <a href="../../reference/glossary.html">glossaire</a> (en anglais)</span></div>
+
+<div class="aside mission"><span class="label">Pourquoi cette leçon</span>
+« Une ligne par entité métier », c'est la phrase sur laquelle un client va te tenir. Le bronze a le même code-barres plusieurs fois :
+<ul>
+<li>des doublons dans un même drop</li>
+<li>le même produit qui revient dans un drop suivant</li>
+<li>parfois une version <em>plus ancienne</em> qui arrive après une plus récente</li>
+</ul>
+Cet après-midi, le silver garde une ligne par <code>code</code>, celle avec le <code>last_modified</code> le plus récent. Peu importe l'ordre des drops et le nombre de runs.</div>
+
+<h2>1. Le MERGE en une image</h2>
+<p>Un <code>MERGE</code> Delta joint une <em>source</em> (les nouvelles lignes) à une <em>cible</em> (la table) sur une condition. Il gère les lignes qui matchent et celles qui ne matchent pas dans un seul commit atomique (<a href="https://docs.delta.io/delta-update/">Delta: table deletes, updates and merges</a>) :</p>
+<pre><code><span class="k">from</span> delta <span class="k">import</span> DeltaTable
+
+(DeltaTable.forPath(spark, silver).alias(<span class="s">"t"</span>)
+    .merge(source.alias(<span class="s">"s"</span>), <span class="s">"t.code = s.code"</span>)       <span class="c"># the business key</span>
+    .whenMatchedUpdateAll()                               <span class="c"># same barcode: overwrite the row</span>
+    .whenNotMatchedInsertAll()                            <span class="c"># new barcode: insert it</span>
+    .execute())</code></pre>
+
+<h2>2. Prédis, puis lance : deux pièges</h2>
+<p>Dans un script de brouillon, crée une table Delta vide (<code>code, n</code>) et une source de deux lignes, <code>("001","a")</code> et <code>("001","b")</code>. Tu vas lancer le MERGE ci-dessus <strong>deux fois</strong>. Note d'abord : combien de lignes après le premier run ? Et après le deuxième ?</p>
+<details class="hint"><summary><strong>Ce qu'on a vu</strong> <span class="sub">— à ouvrir une fois que tu l'as lancé</span></summary><div class="hint-body">
+<p>Premier run : <strong>2 lignes</strong>, toutes les deux en <code>001</code>. Aucune ligne de la cible n'a matché, donc les deux sont entrées, sans aucune erreur. Deuxième run : <code>[DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE] Cannot perform Merge as multiple source rows matched…</code>. L'erreur ne sort qu'une fois que la cible a la clé.</p>
+<p>Deuxième piège : une ligne avec <code>code = null</code>. En SQL, <code>null = null</code> n'est pas vrai. Elle ne matche donc jamais et se fait <em>réinsérer à chaque run</em>. C'est pour ça que <code>code_missing</code> tourne dans <code>split</code>, avant le MERGE.</p></div></details>
+
+<h2>3. Deux fixes, deux lignes chacun</h2>
+<p><strong>Rendre la source unique.</strong> Garde une ligne par <code>code</code> : le <code>last_modified</code> le plus récent, puis le chargement le plus récent en cas d'égalité. Une window fait ça (<a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/api/pyspark.sql.functions.row_number.html"><code>row_number</code></a>) :</p>
+<pre><code>SILVER_COLUMNS = [<span class="s">"code"</span>, <span class="s">"product_name"</span>, <span class="s">"brands"</span>, <span class="s">"categories"</span>, <span class="s">"countries"</span>, <span class="s">"nutrition_grade_fr"</span>, <span class="s">"sugars_100g"</span>, <span class="s">"last_modified"</span>]   <span class="c"># lesson 4's good, minus loaded_at</span>
+<span class="k">from</span> pyspark.sql <span class="k">import</span> Window
+
+w = Window.partitionBy(<span class="s">"code"</span>).orderBy(F.desc(<span class="s">"last_modified"</span>), F.desc(<span class="s">"loaded_at"</span>))
+latest = good.withColumn(<span class="s">"_n"</span>, F.row_number().over(w)).filter(<span class="s">"_n = 1"</span>).select(*SILVER_COLUMNS)</code></pre>
+<p><strong>Ne jamais laisser gagner une ligne plus ancienne.</strong> Une mise à jour en retard est plus vieille que la ligne du silver. Du coup, on ne met à jour que si la source est plus récente.</p>
+<pre><code>.whenMatchedUpdateAll(condition=<span class="s">"s.last_modified &gt; t.last_modified"</span>)</code></pre>
+<div class="aside key"><span class="label">Idempotent</span>
+Avec les deux fixes, un re-run sur le même bronze ne change aucune ligne : chaque match rate la condition <code>&gt;</code> et rien n'est inséré. C'est pour ça qu'un batch planté ou relancé ne fait pas de dégâts. Sur un projet client, un orchestrateur relance un run de nuit planté sans te demander, et c'est ça qui rend ce retry sans risque. Ton binôme teste ça en premier dans ta PR. (Delta commit quand même une nouvelle version à chaque run.)</div>
+
+<h2>4. Exercice : <code>merge_silver</code> <span class="tier core">core</span></h2>
+<p>Ajoute <code>latest(good)</code> et <code>merge_silver(spark, good, silver)</code> dans <code>jobs/silver.py</code>, et ce test dans <code>tests/test_silver.py</code> (chargement, mise à jour en retard, re-run, mêmes lignes à chaque fois) :</p>
+<pre><code><span class="k">from</span> jobs.silver <span class="k">import</span> split, merge_silver
+
+
+<span class="k">def</span> silver_rows(spark, path):
+    <span class="k">return</span> sorted((r.code, r.product_name, r.last_modified)
+                  <span class="k">for</span> r <span class="k">in</span> spark.read.format(<span class="s">"delta"</span>).load(path).collect())
+
+
+<span class="k">def</span> test_latest_last_modified_wins_and_rerun_changes_nothing(spark, tmp_path):
+    path = str(tmp_path / <span class="s">"silver"</span>)
+    good, _ = split(bronze(spark,
+        (<span class="s">"001"</span>, <span class="s">"Choco"</span>,     <span class="s">"45"</span>, <span class="s">"2026-01-01"</span>),
+        (<span class="s">"001"</span>, <span class="s">"Choco bar"</span>, <span class="s">"44"</span>, <span class="s">"2026-02-01"</span>),   <span class="c"># newer: wins</span>
+        (<span class="s">"001"</span>, <span class="s">"Choco bar"</span>, <span class="s">"44"</span>, <span class="s">"2026-02-01"</span>),   <span class="c"># exact duplicate</span>
+        (<span class="s">"002"</span>, <span class="s">"Water"</span>,     <span class="s">"0"</span>,  <span class="s">"2026-01-01"</span>)))
+    merge_silver(spark, good, path)
+    late, _ = split(bronze(spark, (<span class="s">"002"</span>, <span class="s">"Old water"</span>, <span class="s">"0"</span>, <span class="s">"2025-12-01"</span>)))   <span class="c"># late update: older</span>
+    merge_silver(spark, late, path)
+    want = [(<span class="s">"001"</span>, <span class="s">"Choco bar"</span>, dt.date(2026, 2, 1)), (<span class="s">"002"</span>, <span class="s">"Water"</span>, dt.date(2026, 1, 1))]
+    <span class="k">assert</span> silver_rows(spark, path) == want
+    merge_silver(spark, good, path)
+    <span class="k">assert</span> silver_rows(spark, path) == want</code></pre>
+<p>Au premier run, il n'y a pas de table dans laquelle merger. Crée-la donc vide : <code>if not DeltaTable.isDeltaTable(spark, silver): latest(good).limit(0).write.format("delta").save(silver)</code> (<a href="https://docs.delta.io/api/latest/python/spark/">DeltaTable API</a>).</p>
+<p><strong>C'est bon quand</strong> les deux tests silver passent.</p>
+<div class="hints" id="ex-merge"></div>
+
+<h2>5. Exercice : le batch silver, et le drop 3 <span class="tier core">core</span></h2>
+<p>Monte le batch (les tests appellent <code>run</code> directement) :</p>
+<ol>
+<li><code>run(spark, bronze, silver, quarantine)</code> : split, écrit la quarantine (comme ce matin), puis fait le <code>merge_silver</code> du bon côté.</li>
+<li><code>__main__</code> se contente de construire la session et d'appeler <code>run(spark, *sys.argv[1:4])</code> avec les chemins du bronze, de <code>gs://…-silver/products</code> et de la quarantine.</li>
+<li>Incrémente <code>silver_run</code> et fais l'apply. Lis la sortie avec <code>gcloud dataproc batches wait &lt;handle&gt;-silver-&lt;n&gt; --region=europe-west1</code>. Si ça a échoué, lis d'abord le dernier <code>Traceback</code>. Ensuite :</li>
+</ol>
+<pre><code>drop next</code></pre>
+<p>Refusé deux fois avec la même ligne ? Poste-la sur Teams avec ton handle, puis <code>drop next --force</code> et dis-le dans ta PR (<a href="0003-landing-to-bronze.html">leçon 3</a>, section 4).</p>
+<p>La gate vérifie qu'il y a une ligne par <code>code</code> dans le silver, et que les lignes sans code-barres du drop 2 sont en quarantine sous <code>code_missing</code>. Ensuite :</p>
+<ol>
+<li>Charge le drop 3 dans le bronze et relance le silver.</li>
+<li><strong>Lis les counts par règle avant tout le reste</strong>. Note quelle règle a explosé.</li>
+<li>Regarde trois lignes en quarantine. Ne les corrige pas aujourd'hui. Demain tu verras pourquoi le fix a sa place dans le silver, pas dans le gold.</li>
+<li>Ouvre la PR <code>&lt;handle&gt;/silver</code> avec <code>jobs/silver.py</code>, <code>tests/test_silver.py</code> et les changements Terraform, et demande une review à ton binôme.</li>
+</ol>
+<p><strong>C'est bon quand</strong> le drop 3 est passé dans le silver et que tu as noté quelle règle a explosé.</p>
+<div class="hints" id="ex-drop3"></div>
+
+<h2>6. Stretch : le prouver avec l'historique <span class="tier stretch">stretch</span></h2>
+<p>Après un re-run, <code>DeltaTable.forPath(spark, silver).history(1).select("operationMetrics").first()[0]</code> montre ce que le MERGE a fait. Affiche <code>numTargetRowsInserted</code> et <code>numTargetRowsUpdated</code> dans la sortie du batch (<a href="https://docs.delta.io/latest/delta-utility.html">table utility commands: history</a>). Lance le silver deux fois sur le même bronze : les deux sont à <code>0</code> la deuxième fois. Là, tu peux prouver que c'est idempotent avec un chiffre tiré du log.</p>
+
+<h2>7. Vérifie-toi</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>8. Source primaire</h2>
+<p>Lis deux sections de la <a href="https://docs.delta.io/delta-update/">Delta "Table deletes, updates, and merges" page</a> (20 minutes). Ce sont <em>Upsert into a table using merge</em> et <em>Data deduplication when writing into Delta tables</em>. Cherche la phrase sur plusieurs lignes de la source qui matchent une seule ligne de la cible : tu l'as déjà croisée.</p>
+
+<div class="aside"><span class="label">Où demander</span>Ton binôme de review d'abord, puis le canal Teams. Ligne de 16h30 : ton drop, tes counts par règle sur le drop 3. Les solutions sont débloquées à 17h00. Demain matin : <a href="0006-gold-never-cleans.html">leçon 6, le gold</a>.</div>
+
+<nav class="lesson-nav"><span><a href="0004-silver-rules-and-quarantine.html">← Leçon 4</a></span><span><a href="0006-gold-never-cleans.html">Leçon 6 : le gold ne nettoie jamais →</a></span></nav>
+</main>
+<script src="../../assets/hints.js"></script>
+<script src="../../assets/quiz.js"></script>
+<script>
+Hints.render("ex-merge", {
+  hint1: "<p><code>latest</code>, c'est la window de la section 3, qui ne renvoie que <code>SILVER_COLUMNS</code> (<code>loaded_at</code> ne sert qu'au tri). <code>merge_silver</code> crée la table si elle manque, puis lance le MERGE de la section 1 sur <code>latest(good)</code> avec la condition de la section 3.</p>",
+  hint2: "<p>Si la deuxième assertion échoue avec <code>Old water</code> dans le silver, ta branche d'update n'a pas de condition. Si le test lève <code>DELTA_MULTIPLE_SOURCE_ROW…</code>, le MERGE lit <code>good</code> et pas <code>latest(good)</code>. Si le silver se retrouve avec une colonne <code>_n</code> ou <code>loaded_at</code>, c'est que <code>latest</code> ne sélectionne pas <code>SILVER_COLUMNS</code>.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day3/jobs/silver.py"
+});
+Hints.render("ex-drop3", {
+  hint1: "<p>Affiche les counts avec <code>rejected.groupBy(\"rule\").count().show()</code>, et un échantillon d'une règle avec <code>rejected.filter(\"rule = 'sugars_not_a_number'\").select(\"code\", \"sugars_100g\", \"source_file\").show(5, False)</code>.</p>",
+  hint2: "<p>La gate dit <code>… has N codes on more than one row</code> : le silver a été écrit sans le MERGE, ou le MERGE lit <code>good</code> au lieu de <code>latest(good)</code>. La gate dit <code>… not in …/quarantine under rule code_missing</code> : <code>run</code> n'écrit pas le côté rejeté, ou l'écrit dans un autre chemin que le troisième arg.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day3/terraform/silver.tf"
+});
+Quiz.render("quiz1", [
+  { prompt: "Ta window <code>latest</code> trie seulement sur <code>last_modified</code>. Deux lignes <code>001</code> ont la même date mais un nom différent. Qu'est-ce qui coince ?",
+    options: ["L'une ou l'autre gagne, selon le run", "Le MERGE lève une erreur de match multiple", "Les deux lignes sont insérées dans le silver"],
+    answer: 0,
+    explain: "<code>row_number</code> garde toujours une ligne par <code>code</code>, donc le MERGE ne voit jamais deux matchs et rien n'est doublé. Mais en cas d'égalité, la ligne qui reçoit le numéro 1 n'est pas fixe, donc le silver peut changer d'un run à l'autre. C'est pour ça que la window trie aussi sur <code>loaded_at</code>." },
+  { prompt: "Le drop 3 amène le code-barres <code>002</code> modifié en 2025. Le silver l'a en version 2026. Que doit-il se passer ?",
+    options: ["Le silver garde la ligne 2026 telle quelle", "Le silver prend la ligne 2025, plus récente", "Le silver garde les deux lignes du code"],
+    answer: 0,
+    explain: "« La plus récente gagne », ça veut dire le <code>last_modified</code> le plus récent, pas la dernière arrivée. La condition d'update <code>s.last_modified &gt; t.last_modified</code> s'en charge." },
+  { prompt: "Pourquoi <code>code_missing</code> doit tourner avant le MERGE, et pas après ?",
+    options: ["Une clé null ne matche jamais, elle s'empile", "Le MERGE lève une erreur sur toute clé null", "La quarantine ne s'écrit pas après un MERGE"],
+    answer: 0,
+    explain: "<code>null = null</code> n'est pas vrai, donc une ligne à clé null est réinsérée à chaque run." }
+]);
+</script>
+</body></html>

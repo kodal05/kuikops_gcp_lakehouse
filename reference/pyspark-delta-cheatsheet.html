@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PySpark &amp; Delta cheat sheet — Medallion ETL on GCP</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<h1>PySpark &amp; Delta cheat sheet</h1>
+<p class="subtitle">Every move the three hops make, in the order the week teaches them. Each snippet was run before it was written here.</p>
+<div class="meta"><span>Reference</span><span>Lessons <a href="../lessons/0002-dataframes-and-delta-locally.html">2</a> to <a href="../lessons/0009-capstone-drop-5-and-the-contract.html">9</a></span><span>Companion: <a href="terraform-and-gcloud-cheatsheet.html">Terraform &amp; gcloud</a> · <a href="glossary.html">glossary</a></span></div>
+
+<h2>Session</h2>
+<pre><code><span class="c"># batch (Delta is on the runtime's classpath)</span>
+spark = (SparkSession.builder.appName(<span class="s">"silver"</span>)
+  .config(<span class="s">"spark.sql.extensions"</span>, <span class="s">"io.delta.sql.DeltaSparkSessionExtension"</span>)
+  .config(<span class="s">"spark.sql.catalog.spark_catalog"</span>, <span class="s">"org.apache.spark.sql.delta.catalog.DeltaCatalog"</span>)
+  .getOrCreate())
+<span class="c"># local: same two configs, wrapped in configure_spark_with_delta_pip(builder); see tests/conftest.py</span></code></pre>
+
+<h2>Bronze: read, stamp, append</h2>
+<pre><code>raw = spark.read.option(<span class="s">"header"</span>, <span class="k">True</span>).csv(landing).withColumnsRenamed(RENAMES)
+raw.select(<span class="s">"*"</span>, F.col(<span class="s">"_metadata.file_path"</span>).alias(<span class="s">"source_file"</span>),
+           F.current_timestamp().alias(<span class="s">"loaded_at"</span>)) \
+   .write.format(<span class="s">"delta"</span>).mode(<span class="s">"append"</span>).save(bronze)
+spark.sql(<span class="s">f"ALTER TABLE delta.`{bronze}` ADD COLUMNS (ecoscore_grade STRING)"</span>)  <span class="c"># a new column, on purpose</span></code></pre>
+
+<h2>Silver: type without raising, one rule column</h2>
+<pre><code>sugars   = F.expr(<span class="s">r"try_cast(regexp_replace(trim(sugars_100g), '\\s*g$', '') AS double)"</span>)
+modified = F.coalesce(F.to_date(F.try_to_timestamp(<span class="s">"last_modified"</span>, F.lit(<span class="s">"yyyy-MM-dd"</span>))),
+                      F.to_date(F.try_to_timestamp(<span class="s">"last_modified"</span>, F.lit(<span class="s">"dd/MM/yyyy"</span>))))
+rule = (F.when(F.col(<span class="s">"code"</span>).isNull() | (F.trim(<span class="s">"code"</span>) == <span class="s">""</span>), <span class="s">"code_missing"</span>)
+         .when(F.col(<span class="s">"_modified"</span>).isNull(), <span class="s">"last_modified_unparseable"</span>)
+         .when(F.col(<span class="s">"sugars_100g"</span>).isNotNull() &amp; F.col(<span class="s">"_sugars"</span>).isNull(), <span class="s">"sugars_not_a_number"</span>)
+         .when((F.col(<span class="s">"_sugars"</span>) &lt; 0) | (F.col(<span class="s">"_sugars"</span>) &gt; 100), <span class="s">"sugars_out_of_range"</span>))
+<span class="c"># good = rule IS NULL; rejected = rule IS NOT NULL (+ rejected_at) -&gt; quarantine, mode("overwrite")</span></code></pre>
+
+<h2>Silver: one row per key, latest wins</h2>
+<pre><code>SILVER_COLUMNS = [<span class="s">"code"</span>, <span class="s">"product_name"</span>, <span class="s">"brands"</span>, <span class="s">"categories"</span>, <span class="s">"countries"</span>, <span class="s">"nutrition_grade_fr"</span>, <span class="s">"sugars_100g"</span>, <span class="s">"last_modified"</span>]   <span class="c"># lesson 4's good, minus loaded_at</span>
+w = Window.partitionBy(<span class="s">"code"</span>).orderBy(F.desc(<span class="s">"last_modified"</span>), F.desc(<span class="s">"loaded_at"</span>))
+latest = good.withColumn(<span class="s">"_n"</span>, F.row_number().over(w)).filter(<span class="s">"_n = 1"</span>).select(*SILVER_COLUMNS)
+
+<span class="k">if not</span> DeltaTable.isDeltaTable(spark, silver):
+    latest.limit(0).write.format(<span class="s">"delta"</span>).save(silver)
+(DeltaTable.forPath(spark, silver).alias(<span class="s">"t"</span>)
+   .merge(latest.alias(<span class="s">"s"</span>), <span class="s">"t.code = s.code"</span>)
+   .whenMatchedUpdateAll(condition=<span class="s">"s.last_modified &gt; t.last_modified"</span>)
+   .whenNotMatchedInsertAll().execute())</code></pre>
+
+<h2>Gold: reshape, never repair</h2>
+<pre><code>(s.withColumn(<span class="s">"category"</span>, F.explode(F.split(<span class="s">"categories"</span>, <span class="s">","</span>)))
+  .withColumn(<span class="s">"country"</span>, F.explode(F.split(<span class="s">"countries"</span>, <span class="s">","</span>)))
+  .groupBy(<span class="s">"category"</span>, <span class="s">"country"</span>, <span class="s">"nutrition_grade_fr"</span>).agg(F.count(<span class="s">"*"</span>).alias(<span class="s">"products"</span>))
+  .write.format(<span class="s">"delta"</span>).mode(<span class="s">"overwrite"</span>).save(<span class="s">f"{gold}/nutriscore_by_category"</span>))</code></pre>
+
+<h2>History, time travel, restore</h2>
+<pre><code>dt = DeltaTable.forPath(spark, path)
+dt.history().select(<span class="s">"version"</span>, <span class="s">"operation"</span>, <span class="s">"operationMetrics.numTargetRowsInserted"</span>).show()
+spark.read.format(<span class="s">"delta"</span>).option(<span class="s">"versionAsOf"</span>, 3).load(path)
+dt.restoreToVersion(3)          <span class="c"># a new commit; nothing erased until VACUUM (7 days retention by default)</span></code></pre>
+
+<h2>Tests</h2>
+<pre><code><span class="k">def</span> test_x(spark, tmp_path):                  <span class="c"># spark: session fixture; tmp_path: fresh folder per test</span>
+    ...
+    <span class="k">assert</span> sorted((r.code, r.rule) <span class="k">for</span> r <span class="k">in</span> rejected.collect()) == [...]   <span class="c"># rows, not counts</span></code></pre>
+
+<h2>Error messages, decoded</h2>
+<table>
+<tr><th>You see</th><th>It means</th><th>Lesson</th></tr>
+<tr><td><code>A schema mismatch detected when writing to the Delta table</code></td><td>the write has a column the table lacks; decide, don't <code>mergeSchema</code></td><td><a href="../lessons/0007-delta-history-restore-and-schema.html">7</a></td></tr>
+<tr><td><code>[CAST_INVALID_INPUT]</code></td><td>a plain cast met a bad value under ANSI mode; use <code>try_cast</code></td><td><a href="../lessons/0004-silver-rules-and-quarantine.html">4</a></td></tr>
+<tr><td><code>[CANNOT_PARSE_TIMESTAMP]</code></td><td>a date in an unexpected format; use <code>try_to_timestamp</code></td><td><a href="../lessons/0004-silver-rules-and-quarantine.html">4</a></td></tr>
+<tr><td><code>[DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE]</code></td><td>the MERGE source has a key twice; deduplicate with <code>row_number</code> first</td><td><a href="../lessons/0005-silver-merge.html">5</a></td></tr>
+<tr><td>silver has the same <code>code</code> twice, no error</td><td>same cause, on a first load into an empty table</td><td><a href="../lessons/0005-silver-merge.html">5</a></td></tr>
+<tr><td>silver grows by one row per run</td><td>a null key reached the MERGE; it never matches</td><td><a href="../lessons/0005-silver-merge.html">5</a></td></tr>
+</table>
+
+<nav class="lesson-nav"><span><a href="glossary.html">← Glossary</a></span><span><a href="terraform-and-gcloud-cheatsheet.html">Terraform &amp; gcloud →</a></span></nav>
+</main></body></html>

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lesson 9 — Capstone: drop 5 and the contract</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="fr/0009-capstone-drop-5-and-the-contract.html" hreflang="fr" lang="fr">Français</a></p>
+<h1>Capstone: drop 5 and the contract</h1>
+<p class="subtitle">Lesson 9 · Friday 09:50 · Run the whole pipeline on the worst drop, and let a contract tell you if silver is right</p>
+<div class="meta"><span>Build 09:50 to 12:15</span><span>Prerequisite: drop 4 in bronze (<a href="0007-delta-history-restore-and-schema.html">lesson 7</a>)</span><span>Reference: <a href="../reference/silver-contract.odcs.yaml">silver contract</a> · <a href="../reference/pyspark-delta-cheatsheet.html">PySpark &amp; Delta cheat sheet</a> · <a href="../reference/glossary.html">glossary</a></span></div>
+
+<div class="aside mission"><span class="label">Why this lesson</span>
+On a client project, you don't get to say "silver is right". A check says it for you. This morning a data contract checks your silver, and passing it on drop 5 is the week's pass criterion. Every line is a rule you built on Wednesday or Thursday, only now a tool checks it.</div>
+
+<h2>1. Read the contract</h2>
+<p>Open <a href="../reference/silver-contract.odcs.yaml"><code>reference/silver-contract.odcs.yaml</code></a>. It's in the Open Data Contract Standard (<a href="https://bitol-io.github.io/open-data-contract-standard/latest/">ODCS</a>), a YAML format for "what a table promises". Three lines cover the week:</p>
+<table>
+<tr><th>Contract line</th><th>What it checks</th><th>Which work makes it pass</th></tr>
+<tr><td><code>code: required, unique</code></td><td>no null barcode, no barcode twice</td><td><code>code_missing</code> rule, plus <code>latest</code> + MERGE (<a href="0005-silver-merge.html">lesson 5</a>)</td></tr>
+<tr><td><code>last_modified: required</code>, <code>date</code></td><td>every row has a parsed date</td><td>two date formats, unparseable → quarantine (lessons <a href="0004-silver-rules-and-quarantine.html">4</a> and <a href="0006-gold-never-cleans.html">6</a>)</td></tr>
+<tr><td><code>sugars_100g: number, minimum 0, maximum 100</code></td><td>no impossible sugar value</td><td>today</td></tr>
+</table>
+<p>It also checks the eight silver columns and their types. <code>drop check silver</code> registers your silver as <code>silver_food_products</code> and runs the contract with <a href="https://docs.datacontract.com/testing">datacontract-cli</a>. Each check prints <code>[passed]</code> or <code>[failed]</code> with a reason:</p>
+<pre><code>[failed] Check that field sugars_100g has a maximum of 100 -- Actual invalid_count(sugars_100g) was 1, expected = 0</code></pre>
+
+<h2>2. Predict drop 5 before you load it</h2>
+<p>Drop 5 keeps the defects of drops 2 to 4. It adds two new ones: <strong>sugar values outside 0 to 100</strong>, and <strong>a file cut off in the middle of a row</strong>. With your pipeline as it is, write down where each ends up (bronze? silver? quarantine, under which rule?). Does the contract pass?</p>
+<details class="hint"><summary><strong>What happens</strong> <span class="sub">— open once you've run drop 5</span></summary><div class="hint-body">
+<p><strong>Out-of-range sugar</strong>: <code>"120"</code> casts to <code>120.0</code> with no error. No rule fires, so it lands in silver and the contract fails on the maximum. A value can be well-formed and impossible.</p>
+<p><strong>The cut-off row</strong>: the CSV reader fills the missing trailing fields with null. So the row reaches bronze with no <code>last_modified</code>. Silver quarantines it as <code>last_modified_unparseable</code>, a rule written for something else. Check its count: a rule that fires for two reasons hides one.</p></div></details>
+
+<h2>3. Exercise: the last rule <span class="tier core">core</span></h2>
+<ol>
+<li>Add a row to your <code>split</code> test: <code>("009", "toomuch", "120", "2026-03-01")</code>, expected in quarantine as <code>sugars_out_of_range</code>.</li>
+<li>Add the rule to the <code>F.when</code> chain, after <code>sugars_not_a_number</code>, on the <em>typed</em> value: <code>(F.col("_sugars") &lt; 0) | (F.col("_sugars") &gt; 100)</code>.</li>
+</ol>
+<p>A null sugar means unknown, not out of range. Check that your rule agrees.</p>
+<p><strong>Done when</strong> the test passes and your <code>005</code> row with no sugar stays in silver.</p>
+<div class="hints" id="ex-rule"></div>
+
+<h2>4. Exercise: end to end, then the check <span class="tier core">core</span></h2>
+<ol>
+<li><code>drop next</code> (if you don't have drop 5 yet).</li>
+<li>Bronze: <code>drop = 5</code>, bump <code>bronze_run</code>, apply, <code>batches wait</code>.</li>
+<li>Silver: bump <code>silver_run</code>, apply, wait. <strong>Read the rule counts first.</strong></li>
+<li>Gold: bump <code>gold_run</code>, apply, wait.</li>
+<li><code>drop check silver</code>, until every line says <code>[passed]</code>.</li>
+</ol>
+<p>One apply per hop, each waiting for the last: Terraform starts all batches of one apply side by side, and silver needs bronze finished. Sandbox: here you're the scheduler. On a client project an orchestrator submits each hop in this order every night. Someone gets paged when one fails (<a href="0010-gold-in-bigquery.html">lesson 10</a>, section 5).</p>
+<p><strong>Done when</strong> <code>drop check silver</code> is all green on drop 5 (the pass criterion).</p>
+<div class="hints" id="ex-check"></div>
+
+<h2>5. The capstone PR <span class="tier core">core</span></h2>
+<p>Make a branch <code>&lt;handle&gt;/capstone</code> with everything since your last merge. In the description, paste:</p>
+<ul>
+<li>the rule counts from the drop-5 silver run</li>
+<li>the last line of <code>drop check silver</code></li>
+<li>one sentence on what changes in your pipeline, and in which layer, if the client says suppliers will now resend corrected rows with an unchanged <code>last_modified</code></li>
+<li>the output of <code>terraform state list</code>, showing your four buckets and the bronze, silver and gold batches</li>
+</ul>
+<p>Then pair review, green CI, and the instructor's review, which is required on this PR.</p>
+
+<h2 id="demo">6. Prepare the demo (15:00, five minutes)</h2>
+<ul class="checklist">
+<li>Run <code>drop check silver</code> live, then show both gold tables' top rows from your drop-5 gold batch output.</li>
+<li>Show quarantine: which rules fired on drop 5, and how many rows each.</li>
+<li>Your pair hands you one unseen defective row the instructor wrote on a card, for example sugar <code>"0,5"</code> with a decimal comma. Say live where your pipeline sends it today, and which layer and rule should change.</li>
+<li>Show one thing you would do differently.</li>
+<li>Say which of your silver rules you'd keep for a different source, and which you'd remove.</li>
+</ul>
+<p>Your reviewing pair asks one question, probably about quarantine.</p>
+
+<h2>7. Stretch: a promise of your own <span class="tier stretch">stretch</span></h2>
+<p>In a copy of the contract, add a rule that <code>nutrition_grade_fr</code> is one of <code>a</code> to <code>e</code>. Nothing checks it today. The right ODCS field is in the <a href="https://bitol-io.github.io/open-data-contract-standard/latest/">specification</a>. Add the matching silver rule and run the check with your copy. Who should own that line, you or silver's consumer?</p>
+
+<h2>8. Check yourself</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>9. Primary source</h2>
+<p>The <a href="https://bitol-io.github.io/open-data-contract-standard/latest/">ODCS specification</a>, schema and data quality sections (20 minutes), with your contract open next to it. Then the <a href="https://docs.datacontract.com/testing">datacontract-cli testing page</a>: the same file run against a warehouse instead of a DataFrame.</p>
+
+<div class="aside"><span class="label">Where to ask</span>The instructor is in the room today. Your pair first anyway: they know your code. This afternoon: <a href="0010-gold-in-bigquery.html">lesson 10, gold in BigQuery</a> (stretch), then demos at 15:00.</div>
+
+<nav class="lesson-nav"><span><a href="0008-tests-that-prove-the-hop.html">← Lesson 8</a></span><span><a href="0010-gold-in-bigquery.html">Lesson 10: gold in BigQuery →</a></span></nav>
+</main>
+<script src="../assets/hints.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+Hints.render("ex-rule", {
+  hint1: "<p>One more <code>.when(…, \"sugars_out_of_range\")</code> at the end of the chain. Comparisons with null give null, and <code>when</code> treats null as false, so a null sugar falls through to no rule by itself.</p>",
+  hint2: "<p><code>[CAST_INVALID_INPUT] The value 'lots' …</code> in the test? Compare <code>_sugars</code> (the typed helper), not <code>sugars_100g</code> (the bronze string): comparing <code>\"120\"</code> with <code>100</code> under ANSI mode is a cast, and a cast of <code>\"lots\"</code> raises.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day5/jobs/silver.py"
+});
+Hints.render("ex-check", {
+  hint1: "<p>Read the first <code>[failed]</code> line only. <code>duplicate_count(code)</code>: your MERGE source is not deduplicated, or silver was written once without the MERGE. <code>missing_count(last_modified)</code>: a date parse that returns null is not routed to quarantine.</p>",
+  hint2: "<p>A type check fails (<code>sugars_100g</code> is not a number, or <code>last_modified</code> not a date): silver was created before <a href=\"0004-silver-rules-and-quarantine.html\">lesson 4</a>'s typing. Silver's schema is fixed at its first write. Restore an older version or, in the sandbox, delete <code>gs://…-silver/products</code> and re-run silver, since it rebuilds from bronze.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day5/"
+});
+Quiz.render("quiz1", [
+  { prompt: "A drop 5 row has <code>sugars_100g = \"-3\"</code>. With Thursday's rules only, where does it end up?",
+    options: ["In silver, as -3.0, no rule fires", "In quarantine, as sugars_not_a_number", "In silver, with sugar set to null"],
+    answer: 0,
+    explain: "<code>\"-3\"</code> is well-formed, so <code>try_cast</code> returns <code>-3.0</code> and <code>sugars_not_a_number</code> doesn't fire: that rule only catches values that can't be read. Nothing on Thursday checked the range, which is why the contract fails and <code>sugars_out_of_range</code> exists." },
+  { prompt: "Silver passes the contract. Can gold still show wrong numbers?",
+    options: ["Yes, the contract only checks silver", "No, gold is derived from silver alone", "Only if gold also has its own contract"],
+    answer: 0,
+    explain: "A wrong <code>groupBy</code> or a missing explode is gold's own bug. The contract checks silver, your gold tests check gold." },
+  { prompt: "A cut-off row ends right after its <code>code</code>, <code>010</code>. Which rule quarantines it in <code>split</code>?",
+    options: ["last_modified_unparseable, the first it fails", "sugars_not_a_number, as sugar is empty", "code_missing, since the row is broken"],
+    answer: 0,
+    explain: "The reader fills the missing fields with null, and <code>split</code> takes the first rule a row fails. <code>code</code> is there, so <code>code_missing</code> passes. An empty sugar is unknown, not malformed, so <code>sugars_not_a_number</code> can't fire. The null date fails next. That's the catch: this count now mixes bad dates with cut-off rows." }
+]);
+</script>
+</body></html>

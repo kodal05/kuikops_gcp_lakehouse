@@ -1,0 +1,7 @@
+# Instructor owns the shared infrastructure. Learner folders have no owner:
+# hop PRs need one peer approval, not the instructor.
+#
+# CODEOWNERS matches paths, not branch names, so it cannot say "setup and capstone
+# PRs only" (<handle>/setup, <handle>/capstone).
+/.github/            @kodal05
+/learners/_template/ @kodal05

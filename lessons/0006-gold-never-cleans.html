@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lesson 6 — Gold never cleans</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="fr/0006-gold-never-cleans.html" hreflang="fr" lang="fr">Français</a></p>
+<h1>Gold never cleans</h1>
+<p class="subtitle">Lesson 6 · Thursday 09:45 · Two tables shaped for two questions, and drop 3 fixed where it belongs</p>
+<div class="meta"><span>≈ 2 hours 30</span><span>Prerequisite: <a href="0005-silver-merge.html">lesson 5</a>, drop 3 through silver</span><span>Reference: <a href="../reference/pyspark-delta-cheatsheet.html">PySpark &amp; Delta cheat sheet</a> · <a href="../reference/glossary.html">glossary</a></span></div>
+
+<div class="aside mission"><span class="label">Why this lesson</span>
+Gold is the only layer the client sees, so it's tempting to "just fix it in the query". But that fixes one chart and leaves silver wrong for every other reader. Today you build two gold tables, then fix the drop-3 numbers in silver and watch gold fix itself.</div>
+
+<h2>1. One table, one question</h2>
+<table>
+<tr><th>Gold table</th><th>Question</th><th>Grain (one row per…)</th></tr>
+<tr><td><code>nutriscore_by_category</code></td><td>How do Nutri-Score grades spread across categories, per country?</td><td>category × country × grade, with a product count</td></tr>
+<tr><td><code>brands_sugar</code></td><td>Which brands have the most products, and how sugary are they?</td><td>brand, top 10 by product count, with average <code>sugars_100g</code></td></tr>
+</table>
+<p>You rebuild both from silver every run and write them with <code>mode("overwrite")</code>. Why not MERGE? Gold is small and there's nothing to merge. At a client's GB a day, rebuilding gold from all of silver every run gets slow and costly. That's when gold moves to partitions or a MERGE.</p>
+<p><code>categories</code> and <code>countries</code> hold comma-separated lists, so the first table needs one row per element: <a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/api/pyspark.sql.functions.explode.html"><code>F.explode</code></a> of <a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/api/pyspark.sql.functions.split.html"><code>F.split</code></a>. That's reshaping, gold's job: no value changes.</p>
+<p>Try it in a scratch script. Predict the row count first.</p>
+<pre><code>spark.createDataFrame([(<span class="s">"France,Spain"</span>,)], [<span class="s">"countries"</span>]).select(F.explode(F.split(<span class="s">"countries"</span>, <span class="s">","</span>)).alias(<span class="s">"country"</span>)).show()</code></pre>
+
+<h2>2. Exercise: two gold functions <span class="tier core">core</span></h2>
+<p>Before you code, write down which of the two tables you'll build first, and why. Then start.</p>
+<p>Create <code>jobs/gold.py</code> with <code>nutriscore_by_category(silver_df)</code> and <code>brands_sugar(silver_df, top=10)</code>. Here's the first test. Write the second yourself, before the function: two Acme products with sugar <code>40.0</code> and <code>null</code>, one Aqua product with <code>0.0</code>. Guess the Acme row before you run it.</p>
+<pre><code><span class="k">import</span> datetime <span class="k">as</span> dt
+<span class="k">from</span> jobs.gold <span class="k">import</span> nutriscore_by_category, brands_sugar
+
+COLS = <span class="s">"code string, product_name string, brands string, categories string, countries string, "</span> \
+       <span class="s">"nutrition_grade_fr string, sugars_100g double, last_modified date"</span>
+D = dt.date(2026, 3, 1)
+
+
+<span class="k">def</span> test_one_product_counts_once_per_category_and_country(spark):
+    s = spark.createDataFrame([
+        (<span class="s">"001"</span>, <span class="s">"Water"</span>, <span class="s">"Aqua"</span>, <span class="s">"Drinks"</span>, <span class="s">"France,Spain"</span>, <span class="s">"a"</span>, 0.0, D),
+        (<span class="s">"002"</span>, <span class="s">"Cola"</span>,  <span class="s">"Fizz"</span>, <span class="s">"Drinks"</span>, <span class="s">"France"</span>,       <span class="s">"e"</span>, 10.6, D)], COLS)
+    <span class="k">assert</span> sorted(tuple(r) <span class="k">for</span> r <span class="k">in</span> nutriscore_by_category(s).collect()) == [
+        (<span class="s">"Drinks"</span>, <span class="s">"France"</span>, <span class="s">"a"</span>, 1), (<span class="s">"Drinks"</span>, <span class="s">"France"</span>, <span class="s">"e"</span>, 1), (<span class="s">"Drinks"</span>, <span class="s">"Spain"</span>, <span class="s">"a"</span>, 1)]</code></pre>
+<p><strong>Done when</strong> both tests pass and you can explain Acme's <code>avg_sugars_100g</code>. (<a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/api/pyspark.sql.functions.avg.html"><code>F.avg</code></a> ignores nulls: Acme is <code>2</code> products, average <code>40.0</code>.)</p>
+<div class="hints" id="ex-gold"></div>
+
+<h2>3. Exercise: the gold batch <span class="tier core">core</span></h2>
+<ol>
+<li>Add a <code>run(spark, silver, gold)</code> that reads silver once and writes both tables: <code>gs://…-gold/nutriscore_by_category</code> and <code>gs://…-gold/brands_sugar</code>.</li>
+<li>Declare the batch with its own <code>gold_run</code> and apply. Read the output with <code>gcloud dataproc batches wait &lt;handle&gt;-gold-&lt;n&gt; --region=europe-west1</code>. If it failed, read the last <code>Traceback</code> first.</li>
+<li>Print the top five rows of each table at the end of <code>__main__</code>.</li>
+</ol>
+<p><strong>Done when</strong> the output shows both tables and you've written one sentence on each: does it look like the data you know?</p>
+<div class="hints" id="ex-goldbatch"></div>
+
+<h2>4. The temptation, and where the fix goes <span class="tier core">core</span></h2>
+<p>Drop 3 sent a lot of rows to quarantine yesterday, so they're missing from <code>brands_sugar</code>. Check your gold numbers: some brands' counts are low.</p>
+<p>You could patch <code>gold.py</code> to read bronze and parse <code>"12 g"</code> there. Don't. Gold reads silver only, and a value gold would have to fix is wrong in silver too, for every other reader.</p>
+<div class="aside key"><span class="label">Gold reshapes, it never repairs</span>
+Does a gold query need a <code>trim</code>, a cast, a parse or a filter for bad rows? Then that line belongs in silver (<a href="../reference/glossary.html">glossary: gold</a>). Gold can <em>reshape</em> (explode, group, join, rank). It can't <em>repair</em> values.</div>
+<p>So extend <code>split</code> in silver. Each change gets a row in your lesson-4 test first:</p>
+<ul>
+<li>A quantity with a unit: strip a trailing <code>g</code> before the cast. <code>F.expr(r"try_cast(regexp_replace(trim(sugars_100g), '\\s*g$', '') AS double)")</code> turns <code>"12 g"</code> into <code>12.0</code> and leaves <code>"lots"</code> as <code>null</code>.</li>
+<li>A second date format: <code>F.coalesce</code> of two <code>try_to_timestamp</code> parses, <code>yyyy-MM-dd</code> first, then <code>dd/MM/yyyy</code> (<a href="https://spark.apache.org/docs/4.0.0/sql-ref-datetime-pattern.html">datetime patterns</a>).</li>
+</ul>
+<pre><code><span class="c"># add to test_each_rejected_row_names_its_rule, and expect them in good:</span>
+(<span class="s">"006"</span>, <span class="s">"unit"</span>,   <span class="s">"12 g"</span>, <span class="s">"2026-03-01"</span>),   <span class="c"># -&gt; ("006", 12.0)</span>
+(<span class="s">"007"</span>, <span class="s">"frDate"</span>, <span class="s">"0"</span>,    <span class="s">"15/03/2026"</span>),   <span class="c"># -&gt; ("007", 0.0), last_modified 2026-03-15</span></code></pre>
+<p>Run silver, then gold, and compare rule counts and gold numbers with this morning's. <strong>Done when</strong>:</p>
+<ul>
+<li>drop 3's quarantine only holds rows no rule could reasonably save</li>
+<li>gold's counts went up with no change to <code>gold.py</code></li>
+<li>one sentence in your PR description, in your own words, on why the drop-3 fix went into <code>silver.py</code> and not <code>gold.py</code>, which your pair reads before approving</li>
+<li>the gate agrees:</li>
+</ul>
+<pre><code>drop next   <span class="c"># checks drop 3's unit and date rows are in silver, and both gold tables exist</span></code></pre>
+<p>Refused twice with the same line? Post it in Teams with your handle, then <code>drop next --force</code> and name it in your PR (<a href="0003-landing-to-bronze.html">lesson 3</a>, section 4).</p>
+<div class="hints" id="ex-fix"></div>
+
+<h2>5. Stretch: shares, not counts <span class="tier stretch">stretch</span></h2>
+<p>40 grade-e snacks means nothing without the total. Add a <code>share</code> column to <code>nutriscore_by_category</code>: products ÷ total products for the same category and country. Use a window with <code>partitionBy("category", "country")</code> and <code>F.sum("products").over(w)</code>, no join needed. Test: one category and country's shares add up to <code>1.0</code>.</p>
+
+<h2>6. Check yourself</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>7. Primary source</h2>
+<p>The <a href="https://docs.databricks.com/aws/en/lakehouse/medallion">Databricks medallion page</a>, gold layer section (10 minutes). Compare its gold with the glossary's "gold never cleans". Which would you put in a client's architecture document, and why?</p>
+
+<div class="aside"><span class="label">Where to ask</span>Your review pair first, then the Teams channel. 16:30 line in Teams. Solutions unlock at 17:00, after both hints. Your pair checks first: no cast, trim or filter in <code>gold.py</code>. Stand-up was at 09:30. This afternoon: <a href="0007-delta-history-restore-and-schema.html">lesson 7, Delta's history, restore, and drop 4</a>.</div>
+
+<nav class="lesson-nav"><span><a href="0005-silver-merge.html">← Lesson 5</a></span><span><a href="0007-delta-history-restore-and-schema.html">Lesson 7: history, restore, schema →</a></span></nav>
+</main>
+<script src="../assets/hints.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+Hints.render("ex-gold", {
+  hint1: "<p>Section 1 has the moves: one <code>F.explode(F.split(...))</code> per list column, then a <code>groupBy</code> on the three grain columns with a count. <code>brands_sugar</code> is the same group-and-aggregate shape on <code>brands</code>, then sorted and limited.</p>",
+  hint2: "<p>If the assertion shows <code>(\"Drinks\", \"France,Spain\", \"a\", 1)</code>, only <code>category</code> was exploded, not <code>country</code>. If the top-10 order changes between runs, two brands tie on <code>products</code>: add <code>brands</code> as a second sort key.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day4/jobs/gold.py"
+});
+Hints.render("ex-goldbatch", {
+  hint1: "<p>Same shape as silver's <code>run</code> in <a href=\"0005-silver-merge.html\">lesson 5</a>: read silver once, call each function, write each result with <code>mode(\"overwrite\")</code> to <code>f\"{gold}/&lt;table name&gt;\"</code>. Copy silver's batch block with <code>gold_run</code> and two args.</p>",
+  hint2: "<p><code>no Delta table at …-gold/brands_sugar</code> from the gate: your <code>run</code> wrote one table, or wrote to <code>gold</code> itself instead of a subfolder.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day4/terraform/gold.tf"
+});
+Hints.render("ex-fix", {
+  hint1: "<p>Only the two typed helper columns change: <code>_sugars</code> gets the <code>regexp_replace</code> inside the <code>try_cast</code>, and <code>_modified</code> becomes <code>F.coalesce(parse1, parse2)</code>.</p>",
+  hint2: "<p>The <code>r\"…\"</code> prefix matters: the SQL string needs <code>\\\\s</code> to reach the regex as <code>\\s</code>. If <code>\"12 g\"</code> is still rejected, print <code>spark.sql(r\"SELECT regexp_replace('12 g', '\\\\s*g$', '')\").first()</code>.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day4/jobs/silver.py"
+});
+Quiz.render("quiz1", [
+  { prompt: "Gold shows <code>\" Spain\"</code> and <code>\"Spain\"</code> as two countries. Where does the <code>trim</code> go?",
+    options: ["Silver, so every reader gets one Spain", "Gold, right before the explode call", "Bronze, so the stored value is right"],
+    answer: 0,
+    explain: "Trimming fixes a value, so it's silver's job. Bronze never changes what landed, and gold only reshapes." },
+  { prompt: "Why is gold written with <code>overwrite</code> while silver uses <code>MERGE</code>?",
+    options: ["Gold is fully derived from silver each run", "Overwrite is faster than MERGE on GCS", "Delta cannot MERGE aggregated tables"],
+    answer: 0,
+    explain: "Silver holds state that drops update, so it needs MERGE. Gold is a function of silver, so a full rebuild stays simple and consistent. Delta could MERGE into a gold table, since it's just a Delta table, but there's nothing to merge: every run recomputes the whole answer." },
+  { prompt: "After the silver fix for drop 3, gold's counts rise. Which file changed?",
+    options: ["Only silver.py and its test file", "gold.py, to read the repaired rows", "bronze.py, to parse units on arrival"],
+    answer: 0,
+    explain: "Gold reads silver, so when silver gets more rows right, gold shows it with no change of its own." }
+]);
+</script>
+</body></html>

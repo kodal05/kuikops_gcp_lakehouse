@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lesson 1 — Your buckets and your first batch</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="fr/0001-your-buckets-and-your-first-batch.html" hreflang="fr" lang="fr">Français</a></p>
+<h1>Your buckets and your first batch</h1>
+<p class="subtitle">Lesson 1 · Monday 14:15 · Declare the four layers in Terraform, run one Spark batch, receive drop 1</p>
+<div class="meta"><span>≈ 90 minutes</span><span>Prerequisite: <a href="0000-where-do-you-start.html">lesson 0</a> green, setup PR merged</span><span>Reference: <a href="../reference/glossary.html">glossary</a> · <a href="../reference/terraform-and-gcloud-cheatsheet.html">Terraform &amp; gcloud cheat sheet</a></span></div>
+
+<div class="aside mission"><span class="label">Why this lesson</span>
+This week's pipeline lives in four buckets and runs as batches. Declared in code, your whole platform is a folder someone else could <code>apply</code> on Friday. Today's hello batch only proves the path from your laptop to a batch on GCS, so tomorrow's job is only about bronze.</div>
+
+<h2>1. Terraform's loop: declare, plan, apply, state</h2>
+<p>Terraform is one loop:</p>
+<ol>
+<li>You <em>declare</em> resources in <code>.tf</code> files.</li>
+<li><code>terraform plan</code> shows the difference between those files and what exists.</li>
+<li><code>terraform apply</code> makes it happen, and the <strong>state</strong> file remembers what it did.</li>
+</ol>
+<p>Your state lives in the shared state bucket, under your handle as prefix. That way ten learners don't overwrite each other (<a href="https://developer.hashicorp.com/terraform/language/backend/gcs">Terraform docs: GCS backend</a>). Sandbox: the instructor made this state bucket and the template's <code>backend.tf</code> for you. On a client project you, or their platform team, create and lock down the state bucket before the first <code>init</code>.</p>
+<pre><code><span class="c"># learners/&lt;handle&gt;/terraform/backend.tf  (already in the template)</span>
+terraform {
+  backend <span class="s">"gcs"</span> {
+    bucket = <span class="s">"kuikops-lakehouse-tfstate"</span>
+    <span class="c"># prefix comes from the command line so the file is identical for everyone</span>
+  }
+}</code></pre>
+<pre><code>cd learners/&lt;handle&gt;/terraform
+terraform init -backend-config=<span class="s">"prefix=&lt;handle&gt;"</span>
+terraform plan</code></pre>
+<div class="aside warn"><span class="label">Read the plan before you type yes</span>
+If <code>plan</code> wants to <em>destroy</em> anything, or shows someone else's handle, your prefix is wrong. Don't apply, fix <code>init</code>.</div>
+
+<h2>2. Exercise: four buckets <span class="tier core">core</span></h2>
+<p>Declare one bucket per layer: <code>landing</code>, <code>bronze</code>, <code>silver</code>, <code>gold</code> (quarantine lives inside the silver bucket). Bucket names are global, so they include the project id and your handle. Use <a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/storage_bucket"><code>google_storage_bucket</code></a> with just the two options below.</p>
+<pre><code>resource <span class="s">"google_storage_bucket"</span> <span class="s">"landing"</span> {
+  name                        = <span class="s">"${var.project_id}-${var.handle}-landing"</span>
+  location                    = <span class="s">"europe-west1"</span>
+  uniform_bucket_level_access = <span class="k">true</span>   <span class="c"># IAM on the bucket, no per-object ACLs</span>
+  force_destroy               = <span class="k">true</span>   <span class="c"># sandbox: destroy may delete objects</span>
+}</code></pre>
+<p><strong>Done when</strong> <code>terraform apply</code> reports four additions and this lists your four buckets:</p>
+<pre><code>gcloud storage ls | grep &lt;handle&gt;</code></pre>
+<div class="hints" id="ex-buckets"></div>
+
+<h2>3. Exercise: a batch that proves the runtime <span class="tier core">core</span></h2>
+<p>A <strong>batch</strong> is one run of one job on Serverless for Apache Spark. You submit a file, and Google runs it, bills the seconds and stops (<a href="https://docs.cloud.google.com/dataproc-serverless/docs/overview">overview</a>). The runtime already has Spark, Python and Delta, so you only ship your script (<a href="https://docs.cloud.google.com/dataproc-serverless/docs/concepts/versions/dataproc-serverless-versions">runtime versions</a>).</p>
+<p>Two resources, in order: put the script in a bucket (<a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/storage_bucket_object"><code>google_storage_bucket_object</code></a>), then declare the batch (<a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/dataproc_batch"><code>google_dataproc_batch</code></a>). The template ships <code>jobs/hello.py</code>:</p>
+<pre><code><span class="c"># jobs/hello.py: write three rows to Delta in your bronze bucket, read them back</span>
+<span class="k">import</span> sys
+<span class="k">from</span> pyspark.sql <span class="k">import</span> SparkSession
+
+bronze = sys.argv[1]
+spark = (SparkSession.builder.appName(<span class="s">"hello"</span>)
+         .config(<span class="s">"spark.sql.extensions"</span>, <span class="s">"io.delta.sql.DeltaSparkSessionExtension"</span>)
+         .config(<span class="s">"spark.sql.catalog.spark_catalog"</span>, <span class="s">"org.apache.spark.sql.delta.catalog.DeltaCatalog"</span>)
+         .getOrCreate())
+df = spark.createDataFrame([(1, <span class="s">"landing"</span>), (2, <span class="s">"bronze"</span>), (3, <span class="s">"silver"</span>)], [<span class="s">"n"</span>, <span class="s">"layer"</span>])
+df.write.format(<span class="s">"delta"</span>).mode(<span class="s">"overwrite"</span>).save(<span class="s">f"{bronze}/hello"</span>)
+<span class="k">print</span>(<span class="s">"rows:"</span>, spark.read.format(<span class="s">"delta"</span>).load(<span class="s">f"{bronze}/hello"</span>).count())</code></pre>
+<p>Apply in two goes. First add only <code>google_storage_bucket_object.hello</code>, apply, and check the script is there: <code>gcloud storage ls gs://…-landing/jobs/</code>. Then add the batch under it and apply again.</p>
+<pre><code>resource <span class="s">"google_storage_bucket_object"</span> <span class="s">"hello"</span> {
+  bucket = google_storage_bucket.landing.name
+  name   = <span class="s">"jobs/hello.py"</span>
+  source = <span class="s">"${path.module}/../jobs/hello.py"</span>
+}
+
+resource <span class="s">"google_dataproc_batch"</span> <span class="s">"hello"</span> {
+  batch_id = <span class="s">"${var.handle}-hello-${var.run}"</span>
+  location = <span class="s">"europe-west1"</span>
+  runtime_config {
+    version    = <span class="s">"3.0"</span>
+    properties = { <span class="s">"spark.dynamicAllocation.maxExecutors"</span> = <span class="s">"2"</span> } <span class="c"># drops are KBs: never scale up</span>
+  }
+  environment_config {
+    execution_config {
+      service_account = var.service_account
+      ttl             = <span class="s">"1800s"</span> <span class="c"># a hung batch is killed after 30 min</span>
+      authentication_config {
+        user_workload_authentication_type = <span class="s">"SERVICE_ACCOUNT"</span> <span class="c"># the API sets this: declare it or every apply replaces the batch</span>
+      }
+    }
+  }
+  pyspark_batch {
+    main_python_file_uri = <span class="s">"gs://${google_storage_bucket_object.hello.bucket}/${google_storage_bucket_object.hello.name}"</span>
+    args                 = [<span class="s">"gs://${google_storage_bucket.bronze.name}"</span>]
+  }
+}</code></pre>
+<p><strong>Done when</strong> the batch shows <code>SUCCEEDED</code> and its log ends with <code>rows: 3</code>:</p>
+<pre><code>terraform apply -var=<span class="s">"run=1"</span>
+gcloud dataproc batches list --region=europe-west1 | grep &lt;handle&gt;
+gcloud dataproc batches describe &lt;handle&gt;-hello-1 --region=europe-west1 --format=<span class="s">"value(state)"</span></code></pre>
+<p>Then change <code>run</code> to <code>2</code> and apply again. Terraform <em>creates</em> a batch, it doesn't update one: runs are immutable, hence the run number in <code>batch_id</code>.</p>
+<div class="hints" id="ex-batch"></div>
+
+<h2>4. Exercise: drop 1 <span class="tier core">core</span></h2>
+<p>You get each drop when you're ready, whatever the day. Drop 1 is open to all:</p>
+<pre><code>drop next
+gcloud storage ls gs://kuikops-lakehouse-&lt;handle&gt;-landing/drop1/</code></pre>
+<p><strong>Done when</strong> you can name the files in <code>drop1/</code> and have opened one with <code>gcloud storage cat … | head</code>. Don't transform anything: landing's only reader is tomorrow's job.</p>
+<div class="hints" id="ex-drop1"></div>
+
+<h2>5. The PR <span class="tier core">core</span></h2>
+<ol>
+<li>Branch <code>&lt;handle&gt;/terraform-buckets</code>.</li>
+<li>Commit <code>terraform/</code> and <code>jobs/hello.py</code>.</li>
+<li>Open the PR with the template and ask your pair.</li>
+<li>In the PR description, write one sentence in your own words on why <code>run = 2</code> created a new batch instead of updating <code>&lt;handle&gt;-hello-1</code>. Your pair reads it before approving.</li>
+<li>CI runs <code>terraform validate</code>. Green CI plus one approval merges it.</li>
+</ol>
+<p>Never commit <code>.terraform/</code> or a state file. The template's <code>.gitignore</code> excludes them, but check it still does.</p>
+
+<h2>6. Stretch: find yourself in the bill <span class="tier stretch">stretch</span></h2>
+<p>Add <code>labels = { owner = var.handle, layer = "landing" }</code> to every bucket and apply. Find them under Billing → Reports, grouped by label. Batches bill per second in Data Compute Units, one-minute minimum (<a href="https://cloud.google.com/dataproc-serverless/pricing">pricing</a>). Your hello batch cost less than a coffee, now you can prove it.</p>
+
+<h2>7. Check yourself</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>8. Primary sources</h2>
+<ul>
+<li><a href="https://developer.hashicorp.com/terraform/language/backend/gcs">Terraform: GCS backend</a> (5 minutes): where the state object lands.</li>
+<li><a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/dataproc_batch"><code>google_dataproc_batch</code> reference</a> (10 minutes): every block, used or not.</li>
+<li><a href="https://docs.cloud.google.com/dataproc-serverless/docs/concepts/network">Serverless network requirements</a> (5 minutes): why the bootstrap subnet has Private Google Access, and why not to override it.</li>
+</ul>
+
+<div class="aside"><span class="label">Where to ask</span>Today the instructor is in the room: raise a hand. From tomorrow: your review pair first, then the Teams channel. Common failures today: the wrong project in <code>gcloud config</code>, a prefix forgotten at <code>init</code>, or a batch failing on <em>subnetwork</em> because an <code>execution_config</code> overrode the bootstrap subnet.</div>
+
+<nav class="lesson-nav"><span><a href="0000-where-do-you-start.html">← Lesson 0</a></span><span><a href="0002-dataframes-and-delta-locally.html">Lesson 2: DataFrames and Delta, locally →</a></span></nav>
+</main>
+<script src="../assets/hints.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+Hints.render("ex-buckets", {
+  hint1: "<p>Copy the <code>landing</code> block three times and change the resource label (<code>\"bronze\"</code>) and the suffix in <code>name</code>. Nothing else differs.</p>",
+  hint2: "<p><code>Error: googleapi: Error 409: … bucket name … not available</code>: bucket names are global, so <code>name</code> must include <code>${var.project_id}-${var.handle}</code>. <code>Duplicate resource</code>: you copied the block and kept the label <code>\"landing\"</code>.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day1/terraform/"
+});
+Hints.render("ex-batch", {
+  hint1: "<p>If the batch is <code>FAILED</code>, read its log. <code>gcloud dataproc batches describe &lt;id&gt; --region=europe-west1</code> shows the state message, and the console's Batches page links to the driver output. A missing bucket or path typo shows there as a <code>FileNotFound</code>, before any Spark code runs.</p>",
+  hint2: "<p>Batch <code>FAILED</code> with a message naming the subnetwork? You set <code>subnetwork_uri</code> or <code>network</code>: remove it. Don't set <code>subnetwork_uri</code> or a <code>network</code>. The bootstrap subnet in <code>europe-west1</code> has Private Google Access and is the region's default. The service account from your bootstrap variables file already has the roles the runtime needs.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day1/terraform/batch.tf"
+});
+Hints.render("ex-drop1", {
+  hint1: "<p>Run <code>drop next</code> from <code>learners/&lt;handle&gt;/</code>: it reads your handle from the folder.</p>",
+  hint2: "<p><code>no valid handle</code>: you're in another folder. <code>no landing bucket …</code>: section 2's apply didn't create <code>landing</code>.</p>"
+});
+Quiz.render("quiz1", [
+  { prompt: "You and your neighbour both ran <code>terraform init</code> with no prefix. They applied first. What does your <code>plan</code> show?",
+    options: ["Their buckets, marked for destruction", "Only your four buckets, as additions", "An error: the state bucket is locked"],
+    answer: 0,
+    explain: "With no prefix you share one state object, so Terraform sees your neighbour's buckets as resources your files no longer declare and plans to destroy them. Different bucket names don't help: the state, not the name, decides what Terraform owns. That's why the prefix goes on <code>init</code>." },
+  { prompt: "You fix a bug in <code>hello.py</code> and apply with the same <code>run</code> value. What happens?",
+    options: ["Only the object updates, no new batch", "A new batch runs with the fixed script", "Terraform refuses: batches are immutable"],
+    answer: 0,
+    explain: "The object changes, but the batch's arguments didn't, so Terraform leaves it alone. To run again you need a new <code>batch_id</code>: that's what <code>run</code> is for." },
+  { prompt: "Which identity reads your landing bucket when the batch runs?",
+    options: ["The service account named in the batch", "The account you logged in with gcloud", "The Compute Engine default account"],
+    answer: 0,
+    explain: "A batch runs as the service account in <code>execution_config</code>, your credentials only submit it. If it lacks a role on a bucket, the job fails, even if <em>you</em> can read it." },
+  { prompt: "You open a drop 1 file and spot a row with no barcode. What do you do with it today?",
+    options: ["Leave it: bronze takes it, silver judges it", "Delete it from landing before bronze reads it", "Fix it in landing so bronze gets a good row"],
+    answer: 0,
+    explain: "Landing keeps files exactly as delivered, and no row disappears. Bronze appends it as-is, then silver sends it to quarantine with the rule it broke. Deleting or fixing it in landing throws away the evidence, and whoever asks the supplier needs the row as it came." }
+]);
+</script>
+</body></html>

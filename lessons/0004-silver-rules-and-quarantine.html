@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lesson 4 — Silver's rules and quarantine</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="fr/0004-silver-rules-and-quarantine.html" hreflang="fr" lang="fr">Français</a></p>
+<h1>Silver's rules and quarantine</h1>
+<p class="subtitle">Lesson 4 · Wednesday 09:45 · Type every column, name every rejection, lose no row</p>
+<div class="meta"><span>≈ 2 hours</span><span>Prerequisite: <a href="0003-landing-to-bronze.html">lesson 3</a>, drop 2 in bronze</span><span>Reference: <a href="../reference/pyspark-delta-cheatsheet.html">PySpark &amp; Delta cheat sheet</a> · <a href="../reference/glossary.html">glossary</a></span></div>
+
+<div class="aside mission"><span class="label">Why this lesson</span>
+On Friday a contract checks silver: typed columns, a barcode and a valid date on every row. Today you write the half of silver that makes that possible. It types bronze's strings, then splits the rows in two: the ones silver keeps, and the ones it refuses, each labelled with its rule. This afternoon's MERGE only sees the good side.</div>
+
+<h2>1. Predict, then run</h2>
+<p>Bronze is all strings. Silver casts, and a cast that can't succeed <em>raises</em> instead of returning null: ANSI mode is on by default (<a href="https://spark.apache.org/docs/4.0.0/sql-migration-guide.html">migration guide</a>). Predict each line, then run it in a local session with <code>spark.sql(f"SELECT {e}").first()[0]</code>:</p>
+<table>
+<tr><th>Expression</th><th>Your prediction</th></tr>
+<tr><td><code>cast('12 g' AS double)</code></td><td></td></tr>
+<tr><td><code>try_cast('12 g' AS double)</code></td><td></td></tr>
+<tr><td><code>to_date('15/03/2026', 'yyyy-MM-dd')</code></td><td></td></tr>
+<tr><td><code>try_to_timestamp('15/03/2026', 'yyyy-MM-dd')</code></td><td></td></tr>
+</table>
+<details class="hint"><summary><strong>What we saw</strong> <span class="sub">— open after you ran them</span></summary><div class="hint-body">
+<p>Line 1 raises <code>[CAST_INVALID_INPUT] The value '12 g' of the type "STRING" cannot be cast to "DOUBLE" because it is malformed</code>. Line 3 raises <code>[CANNOT_PARSE_TIMESTAMP]</code>. Lines 2 and 4 return <code>None</code>.</p>
+<p>So with lines 1 and 3, one bad row kills the whole batch. With the <code>try_</code> forms, the row survives as a null that a rule can catch. That's why silver only uses those (<a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/functions.html"><code>pyspark.sql.functions</code></a>: <code>try_to_timestamp</code>, and <code>try_cast</code> through <code>F.expr</code>).</p></div></details>
+
+<h2>2. One rule column</h2>
+<p>A rule is a condition plus a name, chained in one <code>F.when</code>. A row's <code>rule</code> column holds the first rule it fails, or <code>null</code> if it fails none. So filtering on that one column gives both sides, and no row falls between them.</p>
+<pre><code>sugars   = F.expr(<span class="s">"try_cast(sugars_100g AS double)"</span>)
+modified = F.to_date(F.try_to_timestamp(<span class="s">"last_modified"</span>, F.lit(<span class="s">"yyyy-MM-dd"</span>)))
+typed = bronze_df.withColumns({<span class="s">"_sugars"</span>: sugars, <span class="s">"_modified"</span>: modified})
+
+rule = (F.when(F.col(<span class="s">"code"</span>).isNull() | (F.trim(<span class="s">"code"</span>) == <span class="s">""</span>), <span class="s">"code_missing"</span>)
+         .when(F.col(<span class="s">"_modified"</span>).isNull(), <span class="s">"last_modified_unparseable"</span>)
+         .when(F.col(<span class="s">"sugars_100g"</span>).isNotNull() &amp; F.col(<span class="s">"_sugars"</span>).isNull(), <span class="s">"sugars_not_a_number"</span>))
+judged = typed.withColumn(<span class="s">"rule"</span>, rule)</code></pre>
+<p>Watch the third rule. Missing sugar is unknown, not an error, so silver keeps it as <code>null</code>. Sugar that <em>was</em> there but couldn't be read is an error. The <code>isNotNull()</code> on the bronze column makes the difference.</p>
+<div class="aside key"><span class="label">What quarantine holds</span>
+The rejected row exactly as bronze had it (all strings, with <code>source_file</code> and <code>loaded_at</code>), plus <code>rule</code> and <code>rejected_at</code>. Whoever asks the supplier "why is this row broken?" needs the original row, not your partly cast copy (<a href="../reference/glossary.html">glossary: quarantine</a>). On a client project that's rarely you: the source team owns the supplier feed, so quarantine is the table you hand them.</div>
+
+<h2>3. Exercise: <code>split</code> <span class="tier core">core</span></h2>
+<p>Create <code>jobs/silver.py</code> with <code>split(bronze_df)</code> returning <code>(good, rejected)</code>. <code>good</code> has these columns, and no others:</p>
+<ul>
+<li><code>code, product_name, brands, categories, countries, nutrition_grade_fr</code>: strings</li>
+<li><code>sugars_100g</code>: double</li>
+<li><code>last_modified</code>: date</li>
+<li><code>loaded_at</code>, for this afternoon's MERGE</li>
+</ul>
+<p>Start from this test, in <code>tests/test_silver.py</code>:</p>
+<pre><code><span class="k">import</span> datetime <span class="k">as</span> dt
+<span class="k">from</span> jobs.silver <span class="k">import</span> split
+
+COLS = <span class="s">"code string, product_name string, brands string, categories string, countries string, "</span> \
+       <span class="s">"nutrition_grade_fr string, sugars_100g string, last_modified string, loaded_at timestamp"</span>
+T0 = dt.datetime(2026, 10, 13, 14, 0)
+
+
+<span class="k">def</span> bronze(spark, *rows):
+    <span class="k">return</span> spark.createDataFrame([(c, n, <span class="s">"B"</span>, <span class="s">"Snacks"</span>, <span class="s">"France"</span>, <span class="s">"a"</span>, s, m, T0) <span class="k">for</span> c, n, s, m <span class="k">in</span> rows], COLS)
+
+
+<span class="k">def</span> test_each_rejected_row_names_its_rule(spark):
+    good, rejected = split(bronze(spark,
+        (<span class="s">"001"</span>, <span class="s">"ok"</span>,      <span class="s">"45"</span>,   <span class="s">"2026-03-01"</span>),
+        (<span class="k">None</span>,  <span class="s">"nocode"</span>,  <span class="s">"1"</span>,    <span class="s">"2026-03-01"</span>),
+        (<span class="s">"003"</span>, <span class="s">"lots"</span>,    <span class="s">"lots"</span>, <span class="s">"2026-03-01"</span>),
+        (<span class="s">"004"</span>, <span class="s">"badDate"</span>, <span class="s">"1"</span>,    <span class="s">"March"</span>),
+        (<span class="s">"005"</span>, <span class="s">"nosugar"</span>, <span class="k">None</span>,   <span class="s">"2026-03-01"</span>)))
+    <span class="k">assert</span> sorted((r.product_name, r.rule) <span class="k">for</span> r <span class="k">in</span> rejected.collect()) == [
+        (<span class="s">"badDate"</span>, <span class="s">"last_modified_unparseable"</span>),
+        (<span class="s">"lots"</span>, <span class="s">"sugars_not_a_number"</span>),
+        (<span class="s">"nocode"</span>, <span class="s">"code_missing"</span>)]
+    <span class="k">assert</span> sorted((r.code, r.sugars_100g) <span class="k">for</span> r <span class="k">in</span> good.collect()) == [(<span class="s">"001"</span>, 45.0), (<span class="s">"005"</span>, <span class="k">None</span>)]</code></pre>
+<p><strong>Done when</strong> the test passes and <code>dict(good.dtypes)</code> shows <code>double</code> for sugars and <code>date</code> for <code>last_modified</code>.</p>
+<div class="hints" id="ex-split"></div>
+
+<h2>4. Exercise: quarantine on drop 2 <span class="tier core">core</span></h2>
+<p>Your real bronze table is on GCS, and your laptop's Spark has no GCS connector, so you check it with a batch.</p>
+<ol>
+<li>Add a <code>__main__</code> to <code>silver.py</code> that reads bronze and splits it.</li>
+<li>Write the rejected side to <code>gs://…-silver/quarantine</code> with <code>mode("overwrite")</code>.</li>
+<li>Print <code>rejected.groupBy("rule").count()</code>.</li>
+<li>Declare a <code>silver</code> batch in Terraform like bronze's: its own <code>silver_run</code>, and args bronze path, silver path, quarantine path.</li>
+</ol>
+<p>Why overwrite and not append? Silver reads <em>all</em> of bronze every run, so each run recomputes every rejection. Appending would list a drop-2 row twice after two runs. Overwrite keeps one row per rejection, and Delta's history keeps every earlier version (<a href="https://docs.delta.io/latest/delta-batch.html">batch writes: overwrite</a>).</p>
+<p><strong>Done when</strong> the batch output shows a count per rule. Each drop-2 row you flagged yesterday is in that count, or you can say why it isn't wrong.</p>
+<div class="hints" id="ex-quarantine"></div>
+
+<h2>5. Stretch: every rule, not the first <span class="tier stretch">stretch</span></h2>
+<p>A row with no barcode <em>and</em> sugar <code>"lots"</code> only gets <code>code_missing</code>. Replace the <code>rule</code> string with <code>rules</code>, an array of every rule the row fails:</p>
+<ol>
+<li>Build one <code>F.when(cond, name)</code> per rule.</li>
+<li>Wrap them in <code>F.array(...)</code>.</li>
+<li>Remove the nulls with <a href="https://spark.apache.org/docs/4.0.0/api/python/reference/pyspark.sql/api/pyspark.sql.functions.array_compact.html"><code>F.array_compact</code></a>. A row is good when the array is empty.</li>
+</ol>
+<p>Adjust your test. Then say in the PR which version you'd pick, and why: which is easier for whoever reads quarantine?</p>
+
+<h2>6. Check yourself</h2>
+<div class="widget quiz" id="quiz1"></div>
+
+<h2>7. Primary source</h2>
+<p>The <a href="https://docs.databricks.com/aws/en/lakehouse/medallion">Databricks medallion architecture page</a>, section on the silver layer (10 minutes). It calls silver "validated, cleaned, enriched", but has no named place for the rows that failed. That's the course's quarantine: stricter than the source, and we mean it.</p>
+
+<div class="aside"><span class="label">Where to ask</span>Your review pair first, then the Teams channel. 16:30 line in Teams. Solutions unlock at 17:00, after both hints. Your pair checks first: every quarantined row carries a rule name. This afternoon: <a href="0005-silver-merge.html">lesson 5, the MERGE</a>.</div>
+
+<nav class="lesson-nav"><span><a href="0003-landing-to-bronze.html">← Lesson 3</a></span><span><a href="0005-silver-merge.html">Lesson 5: silver MERGE on the business key →</a></span></nav>
+</main>
+<script src="../assets/hints.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+Hints.render("ex-split", {
+  hint1: "<p>Section 2 builds <code>judged</code>. <code>good</code> is the rows where <code>rule</code> is null, <code>rejected</code> the rest. Write those two filters, then shape each side to its column list: the bullets above for <code>good</code>, the \"What quarantine holds\" box for <code>rejected</code>.</p>",
+  hint2: "<p>A <code>[CAST_INVALID_INPUT]</code> in the test means a plain <code>.cast(\"double\")</code> slipped in somewhere. Use the <code>try_cast</code> expression. If <code>005</code> lands in quarantine, your third rule is missing <code>F.col(\"sugars_100g\").isNotNull()</code>.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day3/jobs/silver.py"
+});
+Hints.render("ex-quarantine", {
+  hint1: "<p>The <code>__main__</code> block mirrors bronze's: build the session with the two Delta configs, then <code>good, rejected = split(spark.read.format(\"delta\").load(sys.argv[1]))</code>. Ignore <code>good</code> until this afternoon.</p>",
+  hint2: "<p>No row in quarantine and you expected some? Print <code>bronze.filter(\"code IS NULL OR trim(code) = ''\").count()</code> in the job. CSV gives an empty field as <code>null</code>, and a field of spaces as spaces, which is why the rule checks both.</p>",
+  solution: "gs://kuikops-lakehouse-solutions/day3/jobs/silver.py"
+});
+Quiz.render("quiz1", [
+  { prompt: "A bronze row has <code>sugars_100g</code> empty. Where does it go, and why?",
+    options: ["Silver, with sugar unknown as null", "Quarantine, as sugars_not_a_number", "Quarantine, as a row missing data"],
+    answer: 0,
+    explain: "Missing isn't malformed. The rule only fires when a bronze value was there and the cast failed." },
+  { prompt: "Why does silver use <code>try_cast</code> rather than <code>cast</code> for sugar?",
+    options: ["One bad value would fail the batch", "It is faster on string columns", "Plain cast was removed from Spark"],
+    answer: 0,
+    explain: "With ANSI mode on, an invalid cast raises and stops the whole batch. <code>try_cast</code> gives a null instead, which a named rule sends to quarantine. Speed has nothing to do with it, and plain <code>cast</code> still exists: it just raises on the first bad value." },
+  { prompt: "Quarantine is written with <code>overwrite</code>. Which earlier rejections are lost?",
+    options: ["None: each run recomputes all of them", "Those of drops older than the latest", "All of them, unless history is enabled"],
+    answer: 0,
+    explain: "Silver reads all of bronze every run, so the rejected set is complete each time. Older versions stay readable through Delta time travel." },
+  { prompt: "You re-applied bronze on drop 2 by mistake, so it holds drop 2's barcode-less row twice. How many rows does quarantine show for it after silver runs?",
+    options: ["Two: one per copy that bronze holds", "One: overwrite keeps one per rejection", "None: a replay is skipped by silver"],
+    answer: 0,
+    explain: "Bronze appended the replay, so it really holds two copies, and <code>split</code> judges every bronze row. Both fail <code>code_missing</code>, so both land in quarantine. Overwrite stops a silver re-run from adding them again, but it doesn't merge copies that bronze holds. Each keeps its own <code>loaded_at</code>, so you can tell them apart." }
+]);
+</script>
+</body></html>

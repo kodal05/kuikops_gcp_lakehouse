@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lesson 0 — Where do you start?</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<p class="lang-switch no-print"><a href="fr/0000-where-do-you-start.html" hreflang="fr" lang="fr">Français</a></p>
+<h1>Where do you start?</h1>
+<p class="subtitle">Lesson 0 · Monday 09:30 · Where you are, and a setup that works</p>
+<div class="meta"><span>≈ 45 minutes</span><span>Prerequisite: none</span><span>Reference: <a href="../reference/glossary.html">glossary</a></span></div>
+
+<div class="aside mission"><span class="label">Why this lesson</span>
+By Friday you'll have built a medallion pipeline on GCP, mostly alone: nobody's in the room Tuesday to Thursday. So you need:
+<ul>
+<li>a clear idea of where <em>you</em> start, so the hints and the stretch tiers fit your level</li>
+<li>a working environment by 10:15, so the week goes into the pipeline, not Docker</li>
+</ul></div>
+
+<h2>1. Seven criteria, three levels <span class="tier core">core</span></h2>
+<p>Rate yourself. No grades, the answers just shape the week.</p>
+<ul>
+<li><em>None</em>: the hints in every exercise are written for you.</li>
+<li><em>Some</em>: you've used it but couldn't teach it.</li>
+<li><em>Solid</em>: you could explain it to your neighbour, so the stretch exercises are yours.</li>
+</ul>
+<div class="widget selfcheck" id="sc"></div>
+<p>Paste the summary line in the Teams channel. The instructor uses the ten lines to pair you up, and on Friday you'll compare.</p>
+<p><strong>Done when</strong> your summary line is in the Teams channel.</p>
+
+<h2>2. Environment check <span class="tier core">core</span></h2>
+<p>Open the shared repo in the devcontainer (VS Code: <em>Reopen in Container</em>). Run each line in its terminal.</p>
+<table>
+<tr><th>Run</th><th>Expect</th><th>If not</th></tr>
+<tr><td><code>gcloud auth login</code></td><td>a browser tab, then "You are now logged in"</td><td>open the URL on your host, paste the code back</td></tr>
+<tr><td><code>gcloud auth application-default login</code></td><td>"Credentials saved to file"</td><td>same trick. Terraform needs this one</td></tr>
+<tr><td><code>gcloud config set project kuikops-lakehouse</code></td><td>"Updated property [core/project]"</td><td>check the id in the Teams channel header (sandbox: one shared project for ten learners, with roles granted for you. A client gives you several projects, dev to prod, and someone else grants your IAM roles)</td></tr>
+<tr><td><code>gcloud storage ls</code></td><td>at least <code>gs://kuikops-lakehouse-tfstate/</code> and <code>…-drops/</code></td><td>wrong project, or login not finished</td></tr>
+<tr><td><code>terraform version</code></td><td>a version line, no error</td><td>you're not in the devcontainer</td></tr>
+<tr><td><code>uv run --directory learners/_template pytest tests/test_smoke.py</code></td><td><code>1 passed</code> after a slow first run</td><td>see hint 1 below</td></tr>
+</table>
+<p>The smoke test writes one tiny Delta table from a local Spark session, the same one your tests use on Tuesday. The first run downloads the JVM packages, so it's slow. After that, seconds.</p>
+<p><strong>Done when</strong> all six rows show their "Expect" value.</p>
+
+<div class="hints" id="ex-env"></div>
+
+<div class="aside warn"><span class="label">Still broken at 10:15?</span>
+Pair with a neighbour for the git block at 10:30 and fix yours with the instructor over lunch. Still stuck? Ask in the Teams channel.</div>
+
+<h2>3. Three predictions <span class="tier core">core</span></h2>
+<p>Answer these in your head before 11:15. They're the whole week in three questions, answers on Wednesday.</p>
+<div class="widget quiz" id="quiz1"></div>
+<p><strong>Done when</strong> you've picked an answer for all three.</p>
+
+<h2>4. Read before 11:15</h2>
+<p>The one-page <a href="../reference/glossary.html">glossary</a>: five layers, three movement words, one platform word, two course words. Use its words all week, in PRs and the Friday demo.</p>
+
+<div class="aside"><span class="label">Where to ask</span>Anything unclear: your review pair first, then the Teams channel. The instructor answers in the room today and Friday, and reads the channel in the evening on the other days.</div>
+
+<nav class="lesson-nav"><span>Course start</span><span><a href="0001-your-buckets-and-your-first-batch.html">Lesson 1: your buckets and your first batch →</a></span></nav>
+</main>
+<script src="../assets/selfcheck.js"></script>
+<script src="../assets/hints.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+SelfCheck.render("sc", ["Python", "SQL", "PySpark", "GCP and gcloud", "Terraform", "git and PRs", "Delta Lake"]);
+Hints.render("ex-env", {
+  hint1: "<p>Read the last ten lines of the output. <code>JAVA_HOME</code> or <code>java: not found</code> means you're outside the devcontainer. A <code>Connection refused</code> on a download means no network yet: wait a minute, rerun.</p>",
+  hint2: "<p>Run <code>java -version</code> and <code>uv run python -c \"import pyspark, delta; print(pyspark.__version__)\"</code> separately. Whichever fails is the layer to fix. If Docker itself won't start, use the Cloud Shell fallback. Don't spend the morning on Docker.</p>"
+});
+Quiz.render("quiz1", [
+  { prompt: "A drop 1 row arrives again, identical, in drop 2. How many copies does <strong>bronze</strong> keep?",
+    options: ["Two rows: bronze keeps all history", "One row: bronze dedups on load", "Zero rows: bronze rejects repeats"],
+    answer: 0,
+    explain: "Bronze appends every landed row with its source file and load time. Picking the right copy is silver's job." },
+  { prompt: "Same duplicate. How many copies does <strong>silver</strong> keep?",
+    options: ["One row: merged on the business key", "Two rows: silver keeps all history", "Zero rows: silver rejects duplicates"],
+    answer: 0,
+    explain: "Silver holds one row per business entity, so the MERGE on the barcode folds the copy into the row it already has, and the latest <code>last_modified</code> wins. Keeping every copy is bronze's job, and a duplicate isn't broken, so nothing goes to quarantine." },
+  { prompt: "A row arrives with no barcode. Where does it end up?",
+    options: ["Quarantine, next to the rule that failed", "Silver, with the barcode left as null", "Nowhere, silver just throws it away"],
+    answer: 0,
+    explain: "No row disappears, so it isn't thrown away. It can't stay in silver either: silver merges on the barcode, and a row with no barcode has no business key to merge on. Quarantine is a Delta table beside silver, and each row carries the rule it broke." }
+]);
+</script>
+</body></html>

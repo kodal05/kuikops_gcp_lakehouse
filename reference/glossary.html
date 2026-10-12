@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Glossary — Medallion ETL on GCP</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<h1>Glossary</h1>
+<p class="subtitle">The vocabulary of the week. Lessons, PR reviews and the Friday demo use these words and no others.</p>
+<div class="meta"><span>Reference</span><span>Source of truth: <code>CONTEXT.md</code></span><span>Print it; keep it beside you</span></div>
+
+<div class="aside key"><span class="label">How to use this page</span>
+When a word in a lesson, a PR or a stand-up feels fuzzy, look it up here first. Each entry says what the thing <em>is</em>, what it <em>never does</em>, and which words to avoid. If you find yourself needing a word that is not here, that is a question for the Teams channel, not a reason to invent one.</div>
+
+<h2>Layers</h2>
+<table>
+<tr><th>Term</th><th>Definition</th><th>Never</th><th>Avoid saying</th></tr>
+<tr><td><strong>Landing</strong></td><td>The zone where source files arrive exactly as delivered: immutable, original format.</td><td>Read by consumers. Only the bronze load reads it.</td><td>raw, inbox, staging, source bucket</td></tr>
+<tr><td><strong>Bronze</strong></td><td>The first Delta layer: every landed row, appended as-is with ingestion metadata (source file, load time). Full history kept.</td><td>Cleans anything.</td><td>raw Delta, clean, ingest layer</td></tr>
+<tr><td><strong>Silver</strong></td><td>The cleaned Delta layer: typed columns, one row per business entity, duplicates resolved by merging on the business key.</td><td>Drops a row silently: failures go to quarantine.</td><td>clean, curated, refined</td></tr>
+<tr><td><strong>Quarantine</strong></td><td>A Delta table beside silver holding the rows silver rejected, with the rule that rejected them.</td><td>Gets forgotten. Read it before you read gold.</td><td>reject table, dead-letter, error table</td></tr>
+<tr><td><strong>Gold</strong></td><td>The consumer-facing Delta layer: aggregates and joins shaped for one question.</td><td>Cleans anything. A fix a gold query needs belongs in silver.</td><td>mart, reporting layer, serving layer</td></tr>
+</table>
+
+<h2>Movement</h2>
+<table>
+<tr><th>Term</th><th>Definition</th><th>Avoid saying</th></tr>
+<tr><td><strong>Hop</strong></td><td>One transformation from a layer to the next (landing→bronze, bronze→silver, silver→gold). Each hop is one job.</td><td>step, stage, task</td></tr>
+<tr><td><strong>Drop</strong></td><td>One delivery of source files into your landing. Drops are numbered; each later drop carries defects the earlier ones did not. You receive the next drop when your pipeline handles the current one (<code>drop next</code>), not on a fixed day.</td><td>batch, load, delivery, ingest</td></tr>
+<tr><td><strong>Business key</strong></td><td>The column(s) that identify one real-world entity across drops. Silver merges on it. This week: the barcode <code>code</code>.</td><td>primary key, id, natural key</td></tr>
+</table>
+
+<h2>Platform</h2>
+<table>
+<tr><th>Term</th><th>Definition</th><th>Avoid saying</th></tr>
+<tr><td><strong>Batch</strong></td><td>A Dataproc Serverless run of one job. Pay per run, no cluster to manage. A batch is immutable: re-running means a new <code>batch_id</code>.</td><td>cluster job, Spark job, submission</td></tr>
+</table>
+
+<h2>Course</h2>
+<table>
+<tr><th>Term</th><th>Definition</th><th>Avoid saying</th></tr>
+<tr><td><strong>Core</strong> <span class="tier core">core</span></td><td>The part of an exercise every learner completes. The pass criterion depends only on core.</td><td>mandatory, basic, level 1</td></tr>
+<tr><td><strong>Stretch</strong> <span class="tier stretch">stretch</span></td><td>An optional harder extension for learners who finish core early. Never a prerequisite for a later core exercise.</td><td>bonus, advanced, level 2, optional</td></tr>
+</table>
+
+<h2>The five layers in one line each</h2>
+<ol>
+<li><strong>Landing</strong> keeps the evidence.</li>
+<li><strong>Bronze</strong> keeps everything, with a stamp.</li>
+<li><strong>Silver</strong> keeps one row per thing, and says why it refused the rest.</li>
+<li><strong>Quarantine</strong> is where "the rest" lives.</li>
+<li><strong>Gold</strong> answers a question and touches nothing.</li>
+</ol>
+
+<nav class="lesson-nav"><span><a href="../lessons/0000-where-do-you-start.html">← Lesson 0</a></span><span><a href="../lessons/0001-your-buckets-and-your-first-batch.html">Lesson 1 →</a></span></nav>
+</main></body></html>

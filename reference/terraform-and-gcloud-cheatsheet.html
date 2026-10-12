@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Terraform &amp; gcloud cheat sheet</title>
+<link rel="stylesheet" href="../assets/course.css"></head>
+<body><main>
+<h1>Terraform &amp; gcloud cheat sheet</h1>
+<p class="subtitle">Everything you type at the platform this week, on one page</p>
+<div class="meta"><span>Reference</span><span>Region <code>europe-west1</code></span><span>Project <code>kuikops-lakehouse</code></span></div>
+
+<h2>The loop</h2>
+<pre><code>cd learners/&lt;handle&gt;/terraform
+terraform init -backend-config=<span class="s">"prefix=&lt;handle&gt;"</span>   <span class="c"># once per clone; your state, your prefix</span>
+terraform fmt &amp;&amp; terraform validate                    <span class="c"># what CI runs</span>
+terraform plan                                         <span class="c"># read it; "destroy" or another handle = stop</span>
+terraform apply -var=<span class="s">"run=N"</span>                             <span class="c"># lesson 1: N changes every time you want a batch to run</span>
+terraform apply                                        <span class="c"># from lesson 3: bump bronze_run / silver_run / gold_run in terraform.tfvars,</span>
+                                                       <span class="c"># one hop per apply, in order, waiting for each</span>
+terraform state list                                   <span class="c"># what Terraform believes exists</span></code></pre>
+
+<h2>Resources you declare</h2>
+<table>
+<tr><th>Resource</th><th>Arguments you use</th><th>Doc</th></tr>
+<tr><td><code>google_storage_bucket</code></td><td><code>name location uniform_bucket_level_access force_destroy labels</code></td><td><a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/storage_bucket">ref</a></td></tr>
+<tr><td><code>google_storage_bucket_object</code></td><td><code>bucket name source</code></td><td><a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/storage_bucket_object">ref</a></td></tr>
+<tr><td><code>google_dataproc_batch</code></td><td><code>batch_id location runtime_config{version properties} environment_config{execution_config{service_account ttl authentication_config{user_workload_authentication_type}}} pyspark_batch{main_python_file_uri python_file_uris args}</code></td><td><a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/dataproc_batch">ref</a></td></tr>
+</table>
+<p>A batch is immutable: same arguments, no new run. New <code>batch_id</code>, new run. Keep <code>maxExecutors = 2</code> and <code>ttl</code> on every batch: the smallest size the service allows is already far more than a drop needs, and the TTL kills a hung batch before it bills all night. Do not set a subnetwork; the bootstrap default has Private Google Access (<a href="https://docs.cloud.google.com/dataproc-serverless/docs/concepts/network">network</a>).</p>
+
+<h2>Looking at things</h2>
+<pre><code>gcloud config list                                           <span class="c"># which project, which account</span>
+gcloud storage ls | grep &lt;handle&gt;                            <span class="c"># your buckets</span>
+gcloud storage ls -r gs://kuikops-lakehouse-&lt;handle&gt;-landing/     <span class="c"># every object</span>
+gcloud storage cat gs://…/drop1/products_0.csv | head -3     <span class="c"># peek, never edit landing</span>
+gcloud storage cp jobs/bronze.py gs://…-landing/jobs/         <span class="c"># manual upload when Terraform is in the way</span>
+gcloud dataproc batches list --region=europe-west1 | grep &lt;handle&gt;
+gcloud dataproc batches describe &lt;id&gt; --region=europe-west1 --format=<span class="s">"value(state,stateMessage)"</span>
+gcloud dataproc batches wait &lt;id&gt; --region=europe-west1      <span class="c"># streams the driver log</span></code></pre>
+
+<h2>Submitting without Terraform</h2>
+<pre><code>gcloud dataproc batches submit pyspark jobs/bronze.py \
+  --batch=&lt;handle&gt;-bronze-N --region=europe-west1 --version=3.0 \
+  --properties=spark.dynamicAllocation.maxExecutors=2 --ttl=30m \
+  --service-account=&lt;handle&gt;@kuikops-lakehouse.iam.gserviceaccount.com \
+  --deps-bucket=gs://kuikops-lakehouse-&lt;handle&gt;-landing \
+  -- gs://…-landing/drop1 gs://…-bronze/products</code></pre>
+<p>Same batch, same immutability; Terraform is just the declared form of this line (<a href="https://docs.cloud.google.com/sdk/gcloud/reference/dataproc/batches/submit/pyspark">reference</a>).</p>
+
+<h2>The course commands</h2>
+<pre><code>drop next            <span class="c"># gate checks your pipeline, then delivers the next drop to landing</span>
+drop next --force    <span class="c"># delivers anyway; logged, allowed, mention it in the PR</span>
+drop check silver    <span class="c"># runs the ODCS contract against your silver (Friday's pass criterion)</span></code></pre>
+
+<nav class="lesson-nav"><span><a href="glossary.html">← Glossary</a></span><span><a href="../lessons/0001-your-buckets-and-your-first-batch.html">Lesson 1 →</a></span></nav>
+</main></body></html>
