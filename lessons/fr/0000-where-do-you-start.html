@@ -33,12 +33,13 @@ D'ici vendredi, tu auras construit un pipeline medallion sur GCP, en grande part
 <tr><td><code>gcloud auth login</code></td><td>un onglet de navigateur, puis « You are now logged in »</td><td>ouvre l'URL sur ta machine hôte, recolle le code</td></tr>
 <tr><td><code>gcloud auth application-default login</code></td><td>« Credentials saved to file »</td><td>même astuce. C'est celle-là dont Terraform a besoin</td></tr>
 <tr><td><code>gcloud config set project kuikops-lakehouse</code></td><td>« Updated property [core/project] »</td><td>vérifie l'id dans l'en-tête du canal Teams (sandbox : un seul projet partagé pour dix apprenants, avec les rôles déjà donnés. Un client te donne plusieurs projets, de dev à prod, et quelqu'un d'autre t'attribue tes rôles IAM)</td></tr>
-<tr><td><code>gcloud storage ls</code></td><td>au moins <code>gs://kuikops-lakehouse-tfstate/</code> et <code>…-drops/</code></td><td>mauvais projet, ou login pas terminé</td></tr>
+<tr><td><code>gcloud storage ls gs://kuikops-lakehouse-drops/</code></td><td><code>drop1/</code> à <code>drop5/</code></td><td>mauvais projet, ou login pas terminé. Tu peux lister un bucket nommé, pas tout le projet</td></tr>
 <tr><td><code>terraform version</code></td><td>une ligne de version, pas d'erreur</td><td>tu n'es pas dans le devcontainer</td></tr>
 <tr><td><code>uv run --directory learners/_template pytest tests/test_smoke.py</code></td><td><code>1 passed</code> après un premier run lent</td><td>voir le hint 1 plus bas</td></tr>
+<tr><td><code>git config user.name "&lt;ton nom&gt;" &amp;&amp; git config user.email "&lt;login&gt;@users.noreply.github.com"</code></td><td>rien d'affiché</td><td>sans ça ton premier push échoue : « unable to auto-detect email address », ou GH007 « would publish a private email address »</td></tr>
 </table>
 <p>Le smoke test écrit une toute petite table Delta depuis une session Spark locale, la même que celle de tes tests mardi. Le premier run télécharge les packages JVM, du coup il est lent. Ensuite, c'est quelques secondes.</p>
-<p><strong>C'est bon quand</strong> les six lignes affichent ce qu'il y a dans la colonne « Tu dois voir ».</p>
+<p><strong>C'est bon quand</strong> les sept lignes affichent ce qu'il y a dans la colonne « Tu dois voir ».</p>
 
 <div class="hints" id="ex-env"></div>
 

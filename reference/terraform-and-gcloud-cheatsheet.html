@@ -28,7 +28,7 @@ terraform state list                                   <span class="c"># what Te
 
 <h2>Looking at things</h2>
 <pre><code>gcloud config list                                           <span class="c"># which project, which account</span>
-gcloud storage ls | grep &lt;handle&gt;                            <span class="c"># your buckets</span>
+for l in landing bronze silver gold; do gcloud storage buckets describe gs://kuikops-lakehouse-&lt;handle&gt;-$l --format=<span class="s">"value(name)"</span>; done  <span class="c"># your buckets: a learner can't list the project</span>
 gcloud storage ls -r gs://kuikops-lakehouse-&lt;handle&gt;-landing/     <span class="c"># every object</span>
 gcloud storage cat gs://…/drop1/products_0.csv | head -3     <span class="c"># peek, never edit landing</span>
 gcloud storage cp jobs/bronze.py gs://…-landing/jobs/         <span class="c"># manual upload when Terraform is in the way</span>

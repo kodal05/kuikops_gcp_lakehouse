@@ -33,12 +33,13 @@ By Friday you'll have built a medallion pipeline on GCP, mostly alone: nobody's 
 <tr><td><code>gcloud auth login</code></td><td>a browser tab, then "You are now logged in"</td><td>open the URL on your host, paste the code back</td></tr>
 <tr><td><code>gcloud auth application-default login</code></td><td>"Credentials saved to file"</td><td>same trick. Terraform needs this one</td></tr>
 <tr><td><code>gcloud config set project kuikops-lakehouse</code></td><td>"Updated property [core/project]"</td><td>check the id in the Teams channel header (sandbox: one shared project for ten learners, with roles granted for you. A client gives you several projects, dev to prod, and someone else grants your IAM roles)</td></tr>
-<tr><td><code>gcloud storage ls</code></td><td>at least <code>gs://kuikops-lakehouse-tfstate/</code> and <code>…-drops/</code></td><td>wrong project, or login not finished</td></tr>
+<tr><td><code>gcloud storage ls gs://kuikops-lakehouse-drops/</code></td><td><code>drop1/</code> to <code>drop5/</code></td><td>wrong project, or login not finished. You can list named buckets, not the whole project</td></tr>
 <tr><td><code>terraform version</code></td><td>a version line, no error</td><td>you're not in the devcontainer</td></tr>
 <tr><td><code>uv run --directory learners/_template pytest tests/test_smoke.py</code></td><td><code>1 passed</code> after a slow first run</td><td>see hint 1 below</td></tr>
+<tr><td><code>git config user.name "&lt;your name&gt;" &amp;&amp; git config user.email "&lt;login&gt;@users.noreply.github.com"</code></td><td>nothing printed</td><td>without it your first push fails: "unable to auto-detect email address", or GH007 "would publish a private email address"</td></tr>
 </table>
 <p>The smoke test writes one tiny Delta table from a local Spark session, the same one your tests use on Tuesday. The first run downloads the JVM packages, so it's slow. After that, seconds.</p>
-<p><strong>Done when</strong> all six rows show their "Expect" value.</p>
+<p><strong>Done when</strong> all seven rows show their "Expect" value.</p>
 
 <div class="hints" id="ex-env"></div>
 
