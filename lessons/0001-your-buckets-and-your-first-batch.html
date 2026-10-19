@@ -134,12 +134,14 @@ gcloud storage ls gs://kuikops-lakehouse-&lt;handle&gt;-landing/drop1/</code></p
 Hints.render("ex-buckets", {
   hint1: "<p>Copy the <code>landing</code> block three times and change the resource label (<code>\"bronze\"</code>) and the suffix in <code>name</code>. Nothing else differs.</p>",
   hint2: "<p><code>Error: googleapi: Error 409: … bucket name … not available</code>: bucket names are global, so <code>name</code> must include <code>${var.project_id}-${var.handle}</code>. <code>Duplicate resource</code>: you copied the block and kept the label <code>\"landing\"</code>.</p>",
-  solution: "gs://kuikops-lakehouse-solutions/day1/terraform/"
+  solution: "gs://kuikops-lakehouse-solutions/day1/terraform/",
+  unlock: "19:00"
 });
 Hints.render("ex-batch", {
   hint1: "<p>If the batch is <code>FAILED</code>, read its log. <code>gcloud dataproc batches describe &lt;id&gt; --region=europe-west1</code> shows the state message, and the console's Batches page links to the driver output. A missing bucket or path typo shows there as a <code>FileNotFound</code>, before any Spark code runs.</p>",
   hint2: "<p>Batch <code>FAILED</code> with a message naming the subnetwork? You set <code>subnetwork_uri</code> or <code>network</code>: remove it. Don't set <code>subnetwork_uri</code> or a <code>network</code>. The bootstrap subnet in <code>europe-west1</code> has Private Google Access and is the region's default. The service account from your bootstrap variables file already has the roles the runtime needs.</p>",
-  solution: "gs://kuikops-lakehouse-solutions/day1/terraform/batch.tf"
+  solution: "gs://kuikops-lakehouse-solutions/day1/terraform/batch.tf",
+  unlock: "19:00"
 });
 Hints.render("ex-drop1", {
   hint1: "<p>Run <code>drop next</code> from <code>learners/&lt;handle&gt;/</code>: it reads your handle from the folder.</p>",
