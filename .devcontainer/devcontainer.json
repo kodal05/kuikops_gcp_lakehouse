@@ -12,7 +12,7 @@
     }
   },
   "remoteUser": "kuikode",
-  "postCreateCommand": "uv tool install --editable tools/drop",
+  "postCreateCommand": "sudo chown -R $USER:$USER /workspaces && uv tool install --editable tools/drop",
   "customizations": {
     "vscode": {
       "extensions": ["ms-python.python", "hashicorp.terraform"]
