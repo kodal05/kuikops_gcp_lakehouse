@@ -30,7 +30,7 @@ terraform {
 terraform init -backend-config=<span class="s">"prefix=&lt;handle&gt;"</span>
 terraform plan</code></pre>
 <div class="aside warn"><span class="label">Lis le plan avant de taper yes</span>
-Si <code>plan</code> veut <em>détruire</em> quoi que ce soit, ou affiche le handle de quelqu'un d'autre, ton préfixe est faux. N'applique pas, corrige le <code>init</code>.</div>
+Si <code>plan</code> veut <em>détruire</em> quoi que ce soit, ou affiche le handle de quelqu'un d'autre, ton préfixe est faux. N'applique pas, corrige le <code>init</code> : <code>terraform init -reconfigure -backend-config="prefix=&lt;handle&gt;"</code>. Le handle dans <code>terraform.tfvars</code> ne fixe pas le préfixe du state, seul <code>init</code> le fait. Une 403 sur le bucket de quelqu'un d'autre veut dire la même chose.</div>
 
 <h2>2. Exercice : quatre buckets <span class="tier core">core</span></h2>
 <p>Déclare un bucket par couche : <code>landing</code>, <code>bronze</code>, <code>silver</code>, <code>gold</code> (la quarantine vit dans le bucket silver). Les noms de bucket sont globaux, du coup ils contiennent l'id du projet et ton handle. Utilise <a href="https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/storage_bucket"><code>google_storage_bucket</code></a> avec juste les deux options ci-dessous.</p>
