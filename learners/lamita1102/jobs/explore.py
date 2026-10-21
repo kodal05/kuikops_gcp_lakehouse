@@ -77,3 +77,4 @@ print(
 
 b.select("code", "product_name", "sugars_100g").show()
 spark.stop()
+
