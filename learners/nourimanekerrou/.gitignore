@@ -1,0 +1,6 @@
+.terraform/
+*.tfstate*
+__pycache__/
+spark-warehouse/
+.venv/
+.pytest_cache/
