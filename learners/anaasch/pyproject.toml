@@ -1,0 +1,15 @@
+[project]
+name = "learner-template"
+version = "0.0.0"
+requires-python = "==3.12.*"
+# Match Serverless for Apache Spark runtime 3.0 (Spark 4.0.1, delta-spark 4.0.0, Python 3.12).
+dependencies = ["pyspark==4.0.1", "delta-spark==4.0.0"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
