@@ -3,6 +3,11 @@ resource "google_storage_bucket" "landing" {
   location                    = "EUROPE-WEST1"
   uniform_bucket_level_access = true
   force_destroy               = true
+
+  labels = {
+    owner = var.handle
+    layer = "landing"
+  }
 }
 
 resource "google_storage_bucket" "bronze" {
@@ -10,6 +15,11 @@ resource "google_storage_bucket" "bronze" {
   location                    = "EUROPE-WEST1"
   uniform_bucket_level_access = true
   force_destroy               = true
+
+  labels = {
+    owner = var.handle
+    layer = "bronze"
+  }
 }
 
 resource "google_storage_bucket" "silver" {
@@ -17,6 +27,11 @@ resource "google_storage_bucket" "silver" {
   location                    = "EUROPE-WEST1"
   uniform_bucket_level_access = true
   force_destroy               = true
+
+  labels = {
+    owner = var.handle
+    layer = "silver"
+  }
 }
 
 resource "google_storage_bucket" "gold" {
@@ -24,4 +39,9 @@ resource "google_storage_bucket" "gold" {
   location                    = "EUROPE-WEST1"
   uniform_bucket_level_access = true
   force_destroy               = true
+
+  labels = {
+    owner = var.handle
+    layer = "gold"
+  }
 }
