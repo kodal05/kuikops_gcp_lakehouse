@@ -1,7 +1,10 @@
 import sys
 from pyspark.sql import SparkSession, functions as F
+from pyspark.sql import Window
+from delta import DeltaTable
 
 STRING_COLS = ["code", "product_name", "brands", "categories", "countries", "nutrition_grade_fr"]
+SILVER_COLUMNS = STRING_COLS + ["sugars_100g", "last_modified"]
 
 
 def split(bronze_df):
@@ -31,15 +34,35 @@ def split(bronze_df):
 
     return good, rejected
 
+def latest(good):
+    # Une seule ligne par code : la plus récente, puis le chargement le plus récent en cas d'égalité.
+    w = Window.partitionBy("code").orderBy(F.desc("last_modified"), F.desc("loaded_at"))
+    return good.withColumn("_n", F.row_number().over(w)).filter("_n = 1").select(*SILVER_COLUMNS)
+
+
+def merge_silver(spark, good, silver):
+    source = latest(good)
+    if not DeltaTable.isDeltaTable(spark, silver):
+        source.limit(0).write.format("delta").save(silver)   # 1er run : on crée la table vide
+    (DeltaTable.forPath(spark, silver).alias("t")
+        .merge(source.alias("s"), "t.code = s.code")
+        .whenMatchedUpdateAll(condition="s.last_modified > t.last_modified")
+        .whenNotMatchedInsertAll()
+        .execute())
+
+
+def run(spark, bronze, silver, quarantine):
+    good, rejected = split(spark.read.format("delta").load(bronze))
+    rejected.write.format("delta").mode("overwrite").save(quarantine)
+    print("quarantine by rule:")
+    rejected.groupBy("rule").count().show()
+    merge_silver(spark, good, silver)
+    print("silver rows:", spark.read.format("delta").load(silver).count())
+
+
 if __name__ == "__main__":
     spark = (SparkSession.builder.appName("silver")
              .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
              .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
              .getOrCreate())
-    bronze_path, silver_path, quarantine_path = sys.argv[1], sys.argv[2], sys.argv[3]
-
-    good, rejected = split(spark.read.format("delta").load(bronze_path))
-    rejected.write.format("delta").mode("overwrite").save(quarantine_path)
-
-    print("quarantine by rule:")
-    rejected.groupBy("rule").count().show()
+    run(spark, *sys.argv[1:4])
