@@ -72,3 +72,44 @@ def test_each_rejected_row_names_its_rule(spark):
     assert bad_sugar.sugars_100g == "lots"
     assert bad_sugar.source_file == "test.csv"
     assert bad_sugar.loaded_at == T0
+
+
+def silver_rows(spark, path):
+    return sorted(
+        (r.code, r.product_name, r.last_modified)
+        for r in spark.read.format("delta").load(path).collect()
+    )
+
+
+def test_latest_wins_and_rerun_changes_nothing(spark, tmp_path):
+    from jobs.silver import merge_silver
+
+    path = str(tmp_path / "silver")
+
+    good, _ = split(bronze(
+        spark,
+        ("001", "Choco", "45", "2026-01-01"),
+        ("001", "Choco bar", "44", "2026-02-01"),
+        ("001", "Choco bar", "44", "2026-02-01"),
+        ("002", "Water", "0", "2026-01-01"),
+    ))
+
+    merge_silver(spark, good, path)
+
+    late, _ = split(bronze(
+        spark,
+        ("002", "Old Water", "0", "2025-12-01"),
+    ))
+
+    merge_silver(spark, late, path)
+
+    expected = [
+        ("001", "Choco bar", dt.date(2026, 2, 1)),
+        ("002", "Water", dt.date(2026, 1, 1)),
+    ]
+
+    assert silver_rows(spark, path) == expected
+
+    merge_silver(spark, good, path)
+
+    assert silver_rows(spark, path) == expected
